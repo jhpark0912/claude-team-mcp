@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build output
+dist/
+dist-ssr/
+
+# Environment
+.env
+.env.local
+*.local
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Database (local dev)
+*.db
+
+# Logs
+*.log
+.playwright-mcp/
+
+# Lock files (keep package-lock.json, uv.lock)
+.claude/

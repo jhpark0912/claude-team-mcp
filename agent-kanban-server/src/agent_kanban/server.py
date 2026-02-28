@@ -1,0 +1,437 @@
+"""MCP Kanban Board Server for Claude Agent Teams collaboration."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.prompts import base
+from pydantic import AnyUrl
+
+from . import db
+from .models import KanbanError
+
+# ── Server Setup ──────────────────────────────────────────────────────────
+
+mcp = FastMCP(
+    "Agent Kanban",
+    json_response=True,
+)
+
+_conn = None
+
+
+def _get_conn():
+    global _conn
+    if _conn is None:
+        _conn = db.get_connection()
+        db.init_db(_conn)
+    return _conn
+
+
+# ── Helper ────────────────────────────────────────────────────────────────
+
+async def _notify_board(ctx: Context, team_id: str) -> None:
+    """Send resource updated notification for the board."""
+    try:
+        await ctx.session.send_resource_updated(AnyUrl(f"kanban://board/{team_id}"))
+    except Exception:
+        pass  # notification is best-effort
+
+
+def _handle_error(e: KanbanError) -> dict[str, Any]:
+    """Convert KanbanError to response dict."""
+    return e.to_dict()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  TOOLS (10)
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── Configuration (2) ─────────────────────────────────────────────────────
+
+@mcp.tool()
+async def create_team(name: str, ctx: Context) -> dict[str, Any]:
+    """새 팀을 생성합니다."""
+    conn = _get_conn()
+    return db.create_team(conn, name)
+
+
+@mcp.tool()
+async def add_agent(team_id: str, name: str, role: str, ctx: Context) -> dict[str, Any]:
+    """팀에 에이전트를 추가합니다. role: PM, Developer, Reviewer, Tester, Designer"""
+    conn = _get_conn()
+    try:
+        result = db.add_agent(conn, team_id, name, role)
+        await _notify_board(ctx, team_id)
+        return result
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+# ── Task Lifecycle (3) ────────────────────────────────────────────────────
+
+@mcp.tool()
+async def create_task(
+    team_id: str,
+    title: str,
+    ctx: Context,
+    description: str = "",
+    priority: str = "Medium",
+    assignee_id: str | None = None,
+) -> dict[str, Any]:
+    """새 칸반 카드를 생성합니다. 초기 상태는 Backlog. priority: Low, Medium, High, Critical"""
+    conn = _get_conn()
+    try:
+        result = db.create_task(
+            conn, team_id, title, description, priority, assignee_id,
+            creator_agent_id=assignee_id,
+        )
+        await _notify_board(ctx, team_id)
+        return result
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def update_task_status(
+    task_id: str,
+    status: str,
+    expected_version: int,
+    ctx: Context,
+    agent_id: str | None = None,
+    comment: str | None = None,
+) -> dict[str, Any]:
+    """카드 상태를 변경합니다. 서버가 전이 규칙을 검증합니다. status: Backlog, Todo, InProgress, Review, Done, Rejected"""
+    conn = _get_conn()
+    try:
+        result = db.update_task_status(
+            conn, task_id, status, expected_version, agent_id, comment,
+        )
+        task = db.get_task(conn, task_id)
+        await _notify_board(ctx, task["team_id"])
+        return result
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def assign_task(
+    task_id: str,
+    assignee_id: str,
+    expected_version: int,
+    ctx: Context,
+) -> dict[str, Any]:
+    """작업을 에이전트에게 할당합니다. 에이전트가 해당 task의 팀 소속인지 서버에서 검증합니다."""
+    conn = _get_conn()
+    try:
+        result = db.assign_task(conn, task_id, assignee_id, expected_version)
+        task = db.get_task(conn, task_id)
+        await _notify_board(ctx, task["team_id"])
+        return result
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+# ── Collaboration (2) ─────────────────────────────────────────────────────
+
+@mcp.tool()
+async def add_note(
+    task_id: str,
+    agent_id: str,
+    content: str,
+    ctx: Context,
+    note_type: str = "progress",
+) -> dict[str, Any]:
+    """카드에 진행사항 메모를 추가합니다. note_type: progress, blocker, handoff, review"""
+    conn = _get_conn()
+    try:
+        result = db.add_note(conn, task_id, agent_id, content, note_type)
+        task = db.get_task(conn, task_id)
+        await _notify_board(ctx, task["team_id"])
+        return result
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def flag_blocker(
+    task_id: str,
+    is_blocked: bool,
+    expected_version: int,
+    ctx: Context,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """작업에 블로커를 설정하거나 해제합니다. is_blocked=true 시 reason 필수."""
+    conn = _get_conn()
+    try:
+        result = db.flag_blocker(conn, task_id, is_blocked, expected_version, reason)
+        task = db.get_task(conn, task_id)
+        await _notify_board(ctx, task["team_id"])
+        return result
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+# ── Board Query (3) ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_board(team_id: str) -> dict[str, Any]:
+    """칸반보드의 상태별 작업 목록을 조회합니다."""
+    conn = _get_conn()
+    try:
+        return db.get_board(conn, team_id)
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def get_task_detail(task_id: str) -> dict[str, Any]:
+    """카드 상세 정보를 전체 노트 포함하여 조회합니다."""
+    conn = _get_conn()
+    try:
+        return db.get_task_detail(conn, task_id)
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def get_team_status(
+    team_id: str,
+    activity_hours: int = 24,
+) -> dict[str, Any]:
+    """팀 전체 통계, 에이전트별 워크로드, 블로커를 요약합니다."""
+    conn = _get_conn()
+    try:
+        return db.get_team_status(conn, team_id, activity_hours)
+    except KanbanError as e:
+        return _handle_error(e)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  RESOURCES (3)
+# ══════════════════════════════════════════════════════════════════════════
+
+KANBAN_RULES = """# 칸반보드 기록 규칙
+
+## 필수 기록 시점
+1. 작업 시작: create_task → update_task_status(InProgress)
+2. 진행 중: add_note (무엇을 했는지, 남은 작업, 블로커)
+3. 완료: update_task_status(Review/Done) + add_note(결과 요약)
+4. 인계: assign_task + add_note(note_type="handoff")
+5. 블로커: flag_blocker(is_blocked=true, reason="...")
+
+## 상태 전이
+Backlog → Todo → InProgress → Review → Done
+                    ↑            │
+                    └── Rejected ┘
+- Todo → Backlog: 우선순위 재조정으로 대기열 복귀
+- Backlog → InProgress: 불허. Todo를 거쳐야 함
+
+## 동시성
+expected_version 필수. 충돌 시 아래 에러 대응 참조.
+
+## 에러 대응
+- VERSION_CONFLICT → get_task_detail로 최신 조회 → expected_version 갱신 → 재시도
+- INVALID_TRANSITION → 허용된 전이 목록 확인 → 올바른 상태로 재요청
+- WIP_LIMIT_EXCEEDED → 다른 InProgress 작업을 Review/Done으로 먼저 이동
+- CROSS_TEAM_ERROR → 올바른 팀의 에이전트 ID 확인
+- VALIDATION_ERROR → 필수 파라미터 누락 확인 (예: 블로커 설정 시 reason 필수)
+"""
+
+
+@mcp.resource("kanban://rules")
+def kanban_rules() -> str:
+    """칸반 기록 규칙 (정적)"""
+    return KANBAN_RULES
+
+
+@mcp.resource("kanban://board/{team_id}")
+def board_resource(team_id: str) -> str:
+    """칸반보드 스냅샷 (구독 가능). task의 v 값을 expected_version으로 사용 가능."""
+    conn = _get_conn()
+    try:
+        return db.get_board_markdown(conn, team_id)
+    except KanbanError as e:
+        return json.dumps(e.to_dict(), ensure_ascii=False)
+
+
+@mcp.resource("kanban://board/{team_id}/agents")
+def agents_resource(team_id: str) -> str:
+    """에이전트 목록 + 작업량"""
+    conn = _get_conn()
+    try:
+        return db.get_agents_markdown(conn, team_id)
+    except KanbanError as e:
+        return json.dumps(e.to_dict(), ensure_ascii=False)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PROMPTS (5)
+# ══════════════════════════════════════════════════════════════════════════
+
+@mcp.prompt(title="Kanban System Prompt")
+def kanban_system_prompt(team_id: str, agent_id: str) -> str:
+    """초기화 시 1회 사용. 보드 스냅샷과 에이전트 담당 작업을 포함합니다."""
+    conn = _get_conn()
+    try:
+        team = db.get_team(conn, team_id)
+        agent = db.get_agent(conn, agent_id)
+        board_data = db.get_board(conn, team_id)
+
+        # Agent's tasks
+        my_tasks = conn.execute(
+            "SELECT id, title, status, version FROM tasks WHERE assignee_id=? AND status NOT IN ('Done','Rejected')",
+            (agent_id,),
+        ).fetchall()
+        my_tasks_str = "\n".join(
+            f'  "{t["title"]}" ({t["status"]} v{t["version"]})' for t in my_tasks
+        ) or "  없음"
+
+        counts = board_data["counts"]
+        blockers_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM tasks WHERE team_id=? AND is_blocked=1",
+            (team_id,),
+        ).fetchone()["cnt"]
+
+        return f"""[칸반 에이전트] 팀: {team['name']} / 역할: {agent['name']} ({agent['role']})
+
+현재 보드 (초기화 시점 기준):
+  InProgress {counts.get('InProgress', 0)}건 / Review {counts.get('Review', 0)}건 / 블로커 {blockers_count}건
+  내 담당:
+{my_tasks_str}
+  ⚠ 이 정보는 초기화 시점 기준입니다. 작업 전 get_board로 최신 상태를 확인하세요.
+
+작업 수행 시 반드시 칸반보드를 업데이트하세요:
+- 시작: create_task 또는 update_task_status → InProgress
+- 진행: add_note로 현황 기록
+- 블로커: flag_blocker로 표시
+- 완료: update_task_status → Done + add_note
+
+규칙 상세: kanban://rules"""
+    except KanbanError as e:
+        return f"Error: {e.message}"
+
+
+@mcp.prompt(title="Daily Standup")
+def daily_standup_prompt(team_id: str) -> str:
+    """일일 스탠드업 요약 생성을 위한 프롬프트."""
+    conn = _get_conn()
+    try:
+        team = db.get_team(conn, team_id)
+        return f"""{team['name']} 일일 스탠드업 요약을 생성하세요.
+get_board와 get_team_status를 호출한 후 아래 형식으로 작성:
+
+## 현황
+Todo {{n}} / InProgress {{n}} / Review {{n}} / Done {{n}}
+
+## 에이전트별
+- {{agent}}: {{task_title}} ({{status}})
+
+## 블로커
+- {{task_title}} - {{reason}} (담당: {{agent}})
+
+## 긴급
+- {{priority가 High/Critical인 작업 목록}}
+
+## 권장 액션
+- {{다음에 해야 할 일 1~2개}}"""
+    except KanbanError as e:
+        return f"Error: {e.message}"
+
+
+@mcp.prompt(title="Task Handoff")
+def task_handoff_prompt(task_id: str, from_agent_id: str, to_agent_id: str) -> str:
+    """작업 인계 시 사용. 필수 포함 항목을 명시합니다."""
+    conn = _get_conn()
+    try:
+        task = db.get_task(conn, task_id)
+        from_agent = db.get_agent(conn, from_agent_id)
+        to_agent = db.get_agent(conn, to_agent_id)
+
+        return f"""작업 인계: '{task['title']}'
+From: {from_agent['name']} ({from_agent['role']}) → To: {to_agent['name']} ({to_agent['role']})
+
+수행:
+1. assign_task로 담당자 변경
+2. add_note(note_type="handoff")로 인수인계 기록
+   필수 포함:
+   - 완료한 것: 어떤 작업을 끝냈는지
+   - 남은 것: 아직 처리하지 않은 항목
+   - 주의사항: 알려진 이슈, 엣지 케이스
+   - 관련 파일 경로: 수정한 파일 목록
+3. update_task_status로 상태 변경 (필요 시)"""
+    except KanbanError as e:
+        return f"Error: {e.message}"
+
+
+@mcp.prompt(title="Blocker Escalation")
+def blocker_escalation_prompt(task_id: str) -> str:
+    """블로커 에스컬레이션 시 사용."""
+    conn = _get_conn()
+    try:
+        task = db.get_task(conn, task_id)
+        reason = task.get("blocker_reason", "알 수 없음")
+
+        return f"""블로커 에스컬레이션: '{task['title']}'
+사유: {reason}
+
+수행:
+1. get_task_detail(task_id)로 현재 상태 확인
+2. get_board(team_id)로 영향받는 InProgress 작업 파악
+3. 대안 검토 (mock, 우회, 다른 작업 먼저 진행)
+4. add_note(note_type="blocker")로 분석 결과 기록
+   필수 포함: 블로커 사유 / 영향 작업 목록 / 제안 대안 / 예상 해소 시점
+5. PM에게 보고할 1-2줄 요약 생성"""
+    except KanbanError as e:
+        return f"Error: {e.message}"
+
+
+@mcp.prompt(title="Task Completion")
+def task_completion_prompt(task_id: str, agent_id: str) -> str:
+    """작업 완료 처리 시 사용. 다음 우선순위 작업도 안내합니다."""
+    conn = _get_conn()
+    try:
+        task = db.get_task(conn, task_id)
+        agent = db.get_agent(conn, agent_id)
+
+        # Find next priority task for this agent
+        next_task = conn.execute(
+            """SELECT title, priority FROM tasks
+               WHERE assignee_id=? AND status='Todo'
+               ORDER BY
+                 CASE priority WHEN 'Critical' THEN 0 WHEN 'High' THEN 1
+                              WHEN 'Medium' THEN 2 WHEN 'Low' THEN 3 END
+               LIMIT 1""",
+            (agent_id,),
+        ).fetchone()
+
+        next_info = "없음"
+        if next_task:
+            next_info = f'"{next_task["title"]}" ({next_task["priority"]})'
+
+        return f"""작업 완료: '{task['title']}'
+
+수행:
+1. update_task_status → Done (expected_version 확인)
+2. add_note로 최종 결과 기록
+   필수 포함:
+   - 변경 사항 요약: 무엇을 어떻게 바꿨는지
+   - 테스트 결과: 검증 완료 여부
+   - 후속 작업 여부: 추가 작업이 필요한지 (필요하면 create_task)
+3. 다음 우선순위 작업 확인
+   내 담당 Todo 중 priority 높은 것: {next_info}
+   ⚠ 이 정보는 생성 시점 기준입니다. get_board로 최신 확인 권장."""
+    except KanbanError as e:
+        return f"Error: {e.message}"
+
+
+# ── Entry Point ───────────────────────────────────────────────────────────
+
+def main():
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
