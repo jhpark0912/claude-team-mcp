@@ -9,6 +9,8 @@ from typing import Any, Generator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .db import (
     DB_PATH,
@@ -95,3 +97,48 @@ def read_team_status(team_id: str, activity_hours: int = 24) -> dict[str, Any]:
             return get_team_status(conn, team_id, activity_hours)
         except NotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── Static Files (Dashboard) ───────────────────────────────────────────
+
+DASHBOARD_DIR = Path(__file__).parent.parent.parent.parent / "agent-kanban-dashboard" / "dist"
+
+
+def _mount_dashboard() -> None:
+    """dist/ 폴더가 존재하면 정적 파일 서빙을 마운트한다."""
+    if not DASHBOARD_DIR.is_dir():
+        return
+
+    # /assets/* 정적 리소스 (JS, CSS, 이미지)
+    assets_dir = DASHBOARD_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    # SPA fallback: /api 이외 모든 경로 → index.html
+    @app.get("/{path:path}")
+    def spa_fallback(path: str) -> FileResponse:
+        file_path = DASHBOARD_DIR / path
+        if file_path.is_file() and not path.startswith("api"):
+            return FileResponse(str(file_path))
+        return FileResponse(str(DASHBOARD_DIR / "index.html"))
+
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(str(DASHBOARD_DIR / "index.html"))
+
+
+_mount_dashboard()
+
+
+# ── Entrypoint ──────────────────────────────────────────────────────────
+
+PORT = 48080
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    conn = get_connection(DB_PATH)
+    init_db(conn)
+    conn.close()
+    uvicorn.run(app, host="127.0.0.1", port=PORT)
