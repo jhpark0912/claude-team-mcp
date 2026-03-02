@@ -35,4 +35,5 @@ __pycache__/
 .playwright-mcp/
 
 # Lock files (keep package-lock.json, uv.lock)
-.claude/
+.claude/*
+!.claude/commands/
