@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import mimetypes
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
+
+# Windows 레지스트리에서 .js MIME 타입이 text/plain으로 등록된 경우 보정
+# 브라우저는 module script의 MIME이 text/plain이면 실행을 거부한다
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -109,22 +115,13 @@ def _mount_dashboard() -> None:
     if not DASHBOARD_DIR.is_dir():
         return
 
-    # /assets/* 정적 리소스 (JS, CSS, 이미지)
-    assets_dir = DASHBOARD_DIR / "assets"
-    if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
-
     # SPA fallback: /api 이외 모든 경로 → index.html
-    @app.get("/{path:path}")
-    def spa_fallback(path: str) -> FileResponse:
-        file_path = DASHBOARD_DIR / path
-        if file_path.is_file() and not path.startswith("api"):
-            return FileResponse(str(file_path))
-        return FileResponse(str(DASHBOARD_DIR / "index.html"))
-
+    # StaticFiles를 최하위에 마운트하여 정적 파일(JS/CSS)의 MIME 타입을 자동 감지
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(str(DASHBOARD_DIR / "index.html"))
+
+    app.mount("/", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
 
 
 _mount_dashboard()
