@@ -81,7 +81,7 @@ async def create_task(
     priority: str = "Medium",
     assignee_id: str | None = None,
 ) -> dict[str, Any]:
-    """새 칸반 카드를 생성합니다. 초기 상태는 Backlog. priority: Low, Medium, High, Critical"""
+    """새 칸반 카드를 생성합니다. 초기 상태는 Backlog. priority: Low, Medium, High, Critical. description: 첫 줄은 작업 요약, 이후 레이블(관련/API/설정/참고)로 구분"""
     conn = _get_conn()
     try:
         result = db.create_task(
@@ -217,8 +217,11 @@ KANBAN_RULES = """# 칸반보드 기록 규칙
 
 ## 필수 기록 시점
 1. 작업 시작: create_task → update_task_status(InProgress)
-2. 진행 중: add_note (무엇을 했는지, 남은 작업, 블로커)
-3. 완료: update_task_status(Review/Done) + add_note(결과 요약)
+2. 진행 중: 아래 상황 발견 시 add_note(note_type="progress")로 기록
+   - 예상과 다른 구조, 원본 버그, 설계 변경이 필요한 부분
+   - 다른 모듈에 영향을 줄 수 있는 변경
+   - 원본과 다르게 구현한 경우 (사유 포함)
+3. Review 전환: add_note로 특이사항 기록 (없으면 "특이사항 없음")
 4. 인계: assign_task + add_note(note_type="handoff")
 5. 블로커: flag_blocker(is_blocked=true, reason="...")
 
@@ -238,6 +241,21 @@ expected_version 필수. 충돌 시 아래 에러 대응 참조.
 - WIP_LIMIT_EXCEEDED → 다른 InProgress 작업을 Review/Done으로 먼저 이동
 - CROSS_TEAM_ERROR → 올바른 팀의 에이전트 ID 확인
 - VALIDATION_ERROR → 필수 파라미터 누락 확인 (예: 블로커 설정 시 reason 필수)
+
+## Task Description 작성 규칙
+첫 줄: 구체적인 작업 내용 (한 줄로 작업을 이해할 수 있어야 한다)
+
+이후 필요한 정보를 레이블로 구분하여 작성:
+  관련: 영향받는 파일, 모듈, 서비스
+  API: 엔드포인트, HTTP 메서드 (해당 시)
+  설정: 설정 파일, 환경변수 (해당 시)
+  참고: 의존성, 선행 작업, 주의사항 (해당 시)
+
+규칙:
+- 첫 줄만으로 작업을 이해할 수 있어야 한다
+- 한 줄에 여러 정보를 마침표로 이어붙이지 마라
+- 해당 없는 레이블은 생략하라
+- 마크다운 헤더(##) 사용 금지 (description 내부)
 """
 
 
