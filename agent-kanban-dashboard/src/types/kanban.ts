@@ -82,19 +82,19 @@ export type Priority = 'Low' | 'Medium' | 'High' | 'Critical';
 export const ALL_STATUSES: Status[] = ['Backlog', 'Todo', 'InProgress', 'Review', 'Done', 'Rejected'];
 
 export const PRIORITY_CONFIG: Record<Priority, { color: string; bg: string }> = {
-  Critical: { color: 'text-red-700', bg: 'bg-red-100' },
-  High: { color: 'text-orange-700', bg: 'bg-orange-100' },
-  Medium: { color: 'text-blue-700', bg: 'bg-blue-100' },
-  Low: { color: 'text-gray-600', bg: 'bg-gray-100' },
+  Critical: { color: 'text-red-400', bg: 'bg-red-500/15' },
+  High: { color: 'text-orange-400', bg: 'bg-orange-500/15' },
+  Medium: { color: 'text-blue-400', bg: 'bg-blue-500/15' },
+  Low: { color: 'text-muted-foreground', bg: 'bg-muted' },
 };
 
 export const STATUS_CONFIG: Record<Status, { label: string; color: string; accent: string }> = {
-  Backlog: { label: 'Backlog', color: 'bg-gray-200', accent: 'bg-gray-400' },
-  Todo: { label: 'Todo', color: 'bg-yellow-200', accent: 'bg-yellow-400' },
-  InProgress: { label: 'In Progress', color: 'bg-blue-200', accent: 'bg-blue-500' },
-  Review: { label: 'Review', color: 'bg-purple-200', accent: 'bg-purple-500' },
-  Done: { label: 'Done', color: 'bg-green-200', accent: 'bg-green-500' },
-  Rejected: { label: 'Rejected', color: 'bg-red-200', accent: 'bg-red-400' },
+  Backlog: { label: '백로그', color: 'text-muted-foreground', accent: 'bg-muted-foreground' },
+  Todo: { label: '할 일', color: 'text-yellow-500', accent: 'bg-yellow-500' },
+  InProgress: { label: '진행 중', color: 'text-blue-500', accent: 'bg-blue-500' },
+  Review: { label: '리뷰', color: 'text-purple-500', accent: 'bg-purple-500' },
+  Done: { label: '완료', color: 'text-green-500', accent: 'bg-green-500' },
+  Rejected: { label: '거절', color: 'text-red-500', accent: 'bg-red-500' },
 };
 
 export interface FilterState {
@@ -109,3 +109,19 @@ export interface DisplayOptions {
 }
 
 export type NoteType = 'progress' | 'blocker' | 'handoff' | 'review' | 'system';
+
+/** 컬럼별 기본 카드 표시 개수 */
+export const COLUMN_CARD_LIMITS: Record<Status, number> = {
+  Backlog: 10,
+  Todo: 10,
+  InProgress: 20,
+  Review: 10,
+  Done: 5,
+  Rejected: 3,
+};
+
+/** 기본 접힌 컬럼 */
+export const DEFAULT_COLLAPSED: Status[] = ['Done', 'Rejected'];
+
+/** 더 보기 클릭 시 추가 로드 수 */
+export const CARD_LOAD_INCREMENT = 10;
