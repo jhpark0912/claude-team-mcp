@@ -116,7 +116,7 @@ export default function TaskDetailDialog({ taskId, onClose }: Props) {
                     {task.description && (
                       <div>
                         <h3 className="text-sm font-semibold text-muted-foreground mb-2">설명</h3>
-                        <div className="prose prose-sm prose-invert max-w-none text-foreground">
+                        <div className="prose prose-sm prose-invert max-w-full text-foreground break-words overflow-hidden">
                           <Markdown>{task.description}</Markdown>
                         </div>
                       </div>
@@ -158,7 +158,7 @@ export default function TaskDetailDialog({ taskId, onClose }: Props) {
                               <div className="text-xs text-muted-foreground mb-0.5">
                                 {new Date(note.created_at).toLocaleString()}
                               </div>
-                              <div className="text-sm text-foreground">
+                              <div className="text-sm text-foreground break-words overflow-hidden">
                                 <Markdown>{note.content}</Markdown>
                               </div>
                             </div>
@@ -198,7 +198,7 @@ function NoteItem({ note }: { note: TaskNote }) {
           </span>
         </div>
       </div>
-      <div className="text-xs leading-relaxed prose prose-sm prose-invert max-w-none">
+      <div className="text-xs leading-relaxed prose prose-sm prose-invert max-w-full break-words overflow-hidden">
         <Markdown>{note.content}</Markdown>
       </div>
     </div>
