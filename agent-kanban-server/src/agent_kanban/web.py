@@ -30,8 +30,8 @@ from .db import (
 from .models import NotFoundError
 
 app = FastAPI(
-    title="Kanban Board Dashboard API",
-    description="기존 MCP Kanban DB를 읽기 전용으로 조회하는 대시보드 API",
+    title="AI-Board API",
+    description="AI-Board MCP DB를 읽기 전용으로 조회하는 대시보드 API",
     version="0.1.0",
 )
 

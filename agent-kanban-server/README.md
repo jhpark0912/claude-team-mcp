@@ -1,6 +1,6 @@
-# Agent Kanban MCP Server
+# AI-Board MCP Server
 
-Claude Agent Teams 협업을 위한 칸반보드 MCP 서버.
+Claude Agent Teams 협업을 위한 AI-Board MCP 서버.
 에이전트들이 작업 진행 상황을 DB에 기록하고, 대시보드에서 시각적으로 확인할 수 있다.
 
 ## 아키텍처

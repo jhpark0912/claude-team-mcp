@@ -1,4 +1,4 @@
-import { RefreshCw, BarChart3, Users, AlertTriangle, Clock, Kanban } from 'lucide-react';
+import { RefreshCw, BarChart3, Users, AlertTriangle, Clock, LayoutDashboard } from 'lucide-react';
 import type { Team, TeamStatus as TeamStatusType } from '@/types/kanban';
 import {
   Sidebar,
@@ -53,8 +53,8 @@ export default function AppSidebar({
     <Sidebar>
       <SidebarHeader className="border-b border-sidebar-border px-4 py-3">
         <div className="flex items-center gap-2 mb-3">
-          <Kanban size={20} className="text-primary" />
-          <span className="font-semibold text-sm text-sidebar-foreground">칸반 보드</span>
+          <LayoutDashboard size={20} className="text-primary" />
+          <span className="font-semibold text-sm text-sidebar-foreground">AI-Board</span>
         </div>
         <Select value={selectedTeamId ?? ''} onValueChange={onTeamChange}>
           <SelectTrigger className="w-full h-8 text-xs">

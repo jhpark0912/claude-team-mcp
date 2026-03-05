@@ -15,7 +15,7 @@ from .models import KanbanError
 # ── Server Setup ──────────────────────────────────────────────────────────
 
 mcp = FastMCP(
-    "Agent Kanban",
+    "AI-Board",
     json_response=True,
 )
 
