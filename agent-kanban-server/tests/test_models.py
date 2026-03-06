@@ -59,11 +59,17 @@ class TestStateTransitions:
     def test_todo_to_inprogress(self):
         validate_transition("Todo", "InProgress")
 
+    def test_todo_to_rejected(self):
+        validate_transition("Todo", "Rejected")
+
     def test_inprogress_to_review(self):
         validate_transition("InProgress", "Review")
 
     def test_inprogress_to_done(self):
         validate_transition("InProgress", "Done")
+
+    def test_inprogress_to_rejected(self):
+        validate_transition("InProgress", "Rejected")
 
     def test_inprogress_to_backlog_forbidden(self):
         with pytest.raises(InvalidTransitionError):

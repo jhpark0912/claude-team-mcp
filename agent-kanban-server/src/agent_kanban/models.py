@@ -46,8 +46,8 @@ class NoteType(str, Enum):
 
 VALID_TRANSITIONS: dict[str, list[str]] = {
     "Backlog": ["Todo"],
-    "Todo": ["Backlog", "InProgress"],
-    "InProgress": ["Review", "Done"],
+    "Todo": ["Backlog", "InProgress", "Rejected"],
+    "InProgress": ["Review", "Done", "Rejected"],
     "Review": ["Done", "Rejected"],
     "Done": [],
     "Rejected": ["InProgress"],
