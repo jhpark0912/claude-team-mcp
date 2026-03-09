@@ -1,0 +1,15 @@
+[Unit]
+Description=AI-Board MCP Kanban Server
+After=network.target
+
+[Service]
+Type=simple
+User=<vm_username>
+WorkingDirectory=/home/<vm_username>/ai-board/agent-kanban-server
+EnvironmentFile=/etc/ai-board.env
+ExecStart=/home/<vm_username>/.local/bin/uv run python -m agent_kanban
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

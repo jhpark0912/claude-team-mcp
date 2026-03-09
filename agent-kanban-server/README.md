@@ -51,6 +51,67 @@ uv run pytest tests/ -v
 }
 ```
 
+## 배포 모드
+
+### 로컬 사용자 (stdio)
+
+각자의 PC에서 독립적인 DB로 실행하는 기본 방식. **환경변수 설정 불필요.**
+
+```bash
+git clone <repo>
+cd agent-kanban-server
+uv sync
+```
+
+`~/.claude/mcp.json` 또는 Claude Desktop 설정:
+
+```json
+{
+  "mcpServers": {
+    "ai-board": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "agent_kanban"],
+      "cwd": "/path/to/agent-kanban-server"
+    }
+  }
+}
+```
+
+### 클라우드 서버 접속 (SSE)
+
+서버가 원격(GCP 등)에 배포된 경우, 여러 PC에서 동일한 DB를 공유할 수 있다.
+
+```json
+{
+  "mcpServers": {
+    "ai-board": {
+      "url": "http://<서버IP>:8000/sse"
+    }
+  }
+}
+```
+
+### 서버 직접 배포 (GCP e2-micro 기준)
+
+환경변수 설정 후 실행. 참고: `.env.example`
+
+```bash
+# /etc/ai-board.env
+MCP_TRANSPORT=sse
+FASTMCP_HOST=0.0.0.0
+FASTMCP_PORT=8000
+KANBAN_DB_PATH=/var/lib/ai-board/kanban.db
+```
+
+systemd 서비스 등록 (`ai-board.service` 참조):
+
+```bash
+sudo cp ai-board.service /etc/systemd/system/
+sudo systemctl enable --now ai-board
+```
+
+---
+
 ### 권한 설정 (settings.local.json)
 
 자동 승인이 필요한 도구 목록:
