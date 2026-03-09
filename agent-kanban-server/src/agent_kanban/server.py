@@ -448,7 +448,9 @@ def task_completion_prompt(task_id: str, agent_id: str) -> str:
 # ── Entry Point ───────────────────────────────────────────────────────────
 
 def main():
-    mcp.run()
+    import os
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

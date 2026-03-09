@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,8 @@ from .models import (
     validate_transition,
 )
 
-DB_PATH = Path(__file__).parent.parent.parent / "kanban.db"
+_env_db_path = os.environ.get("KANBAN_DB_PATH")
+DB_PATH = Path(_env_db_path) if _env_db_path else Path(__file__).parent.parent.parent / "kanban.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
