@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -17,6 +18,8 @@ from .models import KanbanError
 mcp = FastMCP(
     "AI-Board",
     json_response=True,
+    host=os.environ.get("FASTMCP_HOST", "127.0.0.1"),
+    port=int(os.environ.get("FASTMCP_PORT", "8000")),
 )
 
 _conn = None
