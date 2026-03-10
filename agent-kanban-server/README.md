@@ -6,16 +6,24 @@ Claude Agent Teams 협업을 위한 AI-Board MCP 서버.
 ## 아키텍처
 
 ```
+[로컬 모드]
 Claude Agent Teams
     │
-    ├─ [stdio] ──→ MCP Server (server.py) ──→ SQLite DB (kanban.db)
+    ├─ [stdio] ──→ MCP Server (server.py) ──→ SQLite DB (kanban.db, 로컬)
     │                10 Tools / 3 Resources / 5 Prompts
     │
     └─ [browser] ──→ Dashboard (web.py:48080)  ──→ SQLite DB (read-only)
-                     REST API + 정적 파일 서빙
+
+[클라우드 공유 모드]
+Claude Agent A (PC-1) ──┐
+Claude Agent B (PC-2) ──┼─ [stdio] ──→ MCP Server (각 로컬) ──→ PostgreSQL (GCP VM)
+Claude Agent C (PC-3) ──┘
 ```
 
 - **MCP 서버**: Claude Code가 stdio로 자동 실행. 에이전트가 도구를 호출하여 DB에 기록
+- **DB 모드**: `KANBAN_DB_HOST` 환경변수 설정 여부로 자동 분기
+  - 미설정 → SQLite 로컬 모드 (기본값, 설정 불필요)
+  - 설정 → PostgreSQL 클라우드 모드 (여러 PC가 동일 DB 공유)
 - **대시보드**: 별도 프로세스로 실행. 같은 DB를 읽기 전용으로 조회하여 칸반보드 표시
 
 ---
@@ -53,9 +61,9 @@ uv run pytest tests/ -v
 
 ## 배포 모드
 
-### 로컬 사용자 (stdio)
+### 로컬 모드 (기본값, 설정 불필요)
 
-각자의 PC에서 독립적인 DB로 실행하는 기본 방식. **환경변수 설정 불필요.**
+각자의 PC에서 독립적인 SQLite DB로 실행. **환경변수 설정 불필요.**
 
 ```bash
 git clone <repo>
@@ -77,37 +85,67 @@ uv sync
 }
 ```
 
-### 클라우드 서버 접속 (SSE)
+### 클라우드 공유 모드 (PostgreSQL)
 
-서버가 원격(GCP 등)에 배포된 경우, 여러 PC에서 동일한 DB를 공유할 수 있다.
+여러 PC의 Claude Agent가 동일한 GCP PostgreSQL DB를 공유하는 방식.
+MCP 서버는 각 로컬에서 실행되며, DB만 클라우드에 위치한다.
+
+**방법 A: `.env` 파일 사용 (권장)**
+
+`agent-kanban-server/.env` 파일 생성:
+
+```ini
+KANBAN_DB_HOST=<gcp-vm-외부IP>
+KANBAN_DB_PORT=5432
+KANBAN_DB_USER=ai_board_user
+KANBAN_DB_PASSWORD=<password>
+KANBAN_DB_NAME=ai_board
+```
+
+mcp.json은 변경 불필요. `.env`는 `.gitignore`에 포함 권장.
+
+**방법 B: mcp.json에 직접 설정**
 
 ```json
 {
   "mcpServers": {
     "ai-board": {
-      "url": "http://<서버IP>:8000/sse"
+      "command": "uv",
+      "args": ["run", "python", "-m", "agent_kanban"],
+      "cwd": "/path/to/agent-kanban-server",
+      "env": {
+        "KANBAN_DB_HOST": "<gcp-vm-외부IP>",
+        "KANBAN_DB_PORT": "5432",
+        "KANBAN_DB_USER": "ai_board_user",
+        "KANBAN_DB_PASSWORD": "<password>",
+        "KANBAN_DB_NAME": "ai_board"
+      }
     }
   }
 }
 ```
 
-### 서버 직접 배포 (GCP e2-micro 기준)
+### GCP PostgreSQL 초기 설정
 
-환경변수 설정 후 실행. 참고: `.env.example`
+PostgreSQL이 설치된 GCP VM에서 1회 실행:
 
 ```bash
-# /etc/ai-board.env
-MCP_TRANSPORT=sse
-FASTMCP_HOST=0.0.0.0
-FASTMCP_PORT=8000
-KANBAN_DB_PATH=/var/lib/ai-board/kanban.db
+# DB 및 사용자 생성
+sudo -u postgres psql
+```
+```sql
+CREATE DATABASE ai_board;
+CREATE USER ai_board_user WITH ENCRYPTED PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE ai_board TO ai_board_user;
+GRANT CREATE ON SCHEMA public TO ai_board_user;
 ```
 
-systemd 서비스 등록 (`ai-board.service` 참조):
+기존 SQLite 데이터 이전 (선택):
 
 ```bash
-sudo cp ai-board.service /etc/systemd/system/
-sudo systemctl enable --now ai-board
+cd agent-kanban-server
+python scripts/migrate_sqlite_to_pg.py --dry-run  # 사전 확인
+python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 ```
 
 ---

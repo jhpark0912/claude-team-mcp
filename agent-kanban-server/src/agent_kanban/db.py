@@ -1,4 +1,9 @@
-"""SQLite database layer with WAL mode, optimistic locking, and auto system notes."""
+"""Database layer — SQLite(로컬) / PostgreSQL(클라우드) 듀얼 모드 지원.
+
+KANBAN_DB_HOST 환경변수 설정 여부로 자동 분기:
+  - 미설정 → SQLite (로컬, 기본값)
+  - 설정   → PostgreSQL (클라우드 공유 DB)
+"""
 
 from __future__ import annotations
 
@@ -9,12 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from nanoid import generate as nanoid
 
 from .models import (
     ALL_STATUSES,
     CrossTeamError,
-    InvalidTransitionError,
     NotFoundError,
     ValidationError,
     VersionConflictError,
@@ -22,10 +27,29 @@ from .models import (
     validate_transition,
 )
 
-_env_db_path = os.environ.get("KANBAN_DB_PATH")
-DB_PATH = Path(_env_db_path) if _env_db_path else Path(__file__).parent.parent.parent / "kanban.db"
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
-SCHEMA = """
+# ── DB 설정 ────────────────────────────────────────────────────────────────
+
+_env_db_path = os.environ.get("KANBAN_DB_PATH")
+SQLITE_PATH = Path(_env_db_path) if _env_db_path else Path(__file__).parent.parent.parent / "kanban.db"
+
+PG_CONFIG = {
+    "host": os.environ.get("KANBAN_DB_HOST", ""),
+    "port": int(os.environ.get("KANBAN_DB_PORT", "5432")),
+    "user": os.environ.get("KANBAN_DB_USER", "ai_board_user"),
+    "password": os.environ.get("KANBAN_DB_PASSWORD", ""),
+    "dbname": os.environ.get("KANBAN_DB_NAME", "ai_board"),
+}
+
+
+def _use_pg() -> bool:
+    return bool(os.environ.get("KANBAN_DB_HOST"))
+
+
+# ── 스키마 ─────────────────────────────────────────────────────────────────
+
+SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -68,7 +92,142 @@ CREATE TABLE IF NOT EXISTS notes (
                 CHECK(note_type IN ('progress','blocker','handoff','review','system')),
     created_at  TEXT DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_tasks_team_id ON tasks(team_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_team_status ON tasks(team_id, status);
+CREATE INDEX IF NOT EXISTS idx_notes_task_type_created ON notes(task_id, note_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agents_team_id ON agents(team_id);
 """
+
+PG_SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS teams (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    created_at  TIMESTAMP DEFAULT NOW(),
+    config      TEXT DEFAULT '{}'
+)""",
+    """CREATE TABLE IF NOT EXISTS agents (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id),
+    name        TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'Developer'
+                CHECK(role IN ('PM','Developer','Reviewer','Tester','Designer')),
+    created_at  TIMESTAMP DEFAULT NOW()
+)""",
+    """CREATE TABLE IF NOT EXISTS tasks (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id),
+    title       TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'Backlog'
+                CHECK(status IN ('Backlog','Todo','InProgress','Review','Done','Rejected')),
+    priority    TEXT NOT NULL DEFAULT 'Medium'
+                CHECK(priority IN ('Low','Medium','High','Critical')),
+    assignee_id TEXT REFERENCES agents(id),
+    is_blocked  BOOLEAN NOT NULL DEFAULT FALSE,
+    blocker_reason TEXT,
+    version     INTEGER NOT NULL DEFAULT 1,
+    created_at  TIMESTAMP DEFAULT NOW(),
+    updated_at  TIMESTAMP DEFAULT NOW()
+)""",
+    """CREATE TABLE IF NOT EXISTS notes (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    agent_id    TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    note_type   TEXT NOT NULL DEFAULT 'progress'
+                CHECK(note_type IN ('progress','blocker','handoff','review','system')),
+    created_at  TIMESTAMP DEFAULT NOW()
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_team_id ON tasks(team_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_team_status ON tasks(team_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_task_type_created ON notes(task_id, note_type, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agents_team_id ON agents(team_id)",
+)
+
+
+# ── 연결 & 헬퍼 ───────────────────────────────────────────────────────────
+
+_pg_pool = None
+
+
+def _get_pg_pool():
+    """PostgreSQL 커넥션 풀 (싱글턴). 최소 1, 최대 5 커넥션."""
+    global _pg_pool
+    if _pg_pool is None:
+        from psycopg2.pool import ThreadedConnectionPool
+        _pg_pool = ThreadedConnectionPool(1, 5, **PG_CONFIG)
+    return _pg_pool
+
+
+def get_connection():
+    """KANBAN_DB_HOST 설정 여부에 따라 PostgreSQL 또는 SQLite 연결 반환."""
+    if _use_pg():
+        import psycopg2
+        return psycopg2.connect(**PG_CONFIG)
+    else:
+        conn = sqlite3.connect(str(SQLITE_PATH))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+
+def get_pooled_connection():
+    """풀에서 PostgreSQL 커넥션 획득. SQLite면 일반 연결 반환."""
+    if _use_pg():
+        return _get_pg_pool().getconn()
+    else:
+        return get_connection()
+
+
+def return_pooled_connection(conn):
+    """풀에 PostgreSQL 커넥션 반환. SQLite면 close."""
+    if _use_pg():
+        _get_pg_pool().putconn(conn)
+    else:
+        conn.close()
+
+
+def _is_pg(conn) -> bool:
+    try:
+        import psycopg2.extensions
+        return isinstance(conn, psycopg2.extensions.connection)
+    except ImportError:
+        return False
+
+
+def _exec(conn, sql: str, params: tuple = ()):
+    """PostgreSQL / SQLite 공용 실행 헬퍼.
+    - PostgreSQL: %s 플레이스홀더, RealDictCursor
+    - SQLite: %s → ? 자동 변환, 기본 커서
+    """
+    if _is_pg(conn):
+        from psycopg2.extras import RealDictCursor
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(sql, params)
+        return cur
+    else:
+        sqlite_sql = sql.replace("%s", "?")
+        return conn.execute(sqlite_sql, params)
+
+
+def init_db(conn) -> None:
+    """테이블 생성 (없을 경우)."""
+    if _is_pg(conn):
+        for stmt in PG_SCHEMA:
+            _exec(conn, stmt)
+    else:
+        conn.executescript(SQLITE_SCHEMA)
+    conn.commit()
+
+
+def _row_to_dict(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return dict(row)
 
 
 def _gen_id(prefix: str) -> str:
@@ -79,42 +238,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
-    """Get a SQLite connection with WAL mode and foreign keys enabled."""
-    path = db_path or DB_PATH
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
-def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables if they don't exist."""
-    conn.executescript(SCHEMA)
-    conn.commit()
-
-
-def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    return dict(row)
-
-
 # ── Helper: agent info ────────────────────────────────────────────────────
 
-def _get_agent_display(conn: sqlite3.Connection, agent_id: str) -> str:
-    """Return 'Name (Role)' for display."""
-    row = conn.execute("SELECT name, role FROM agents WHERE id=?", (agent_id,)).fetchone()
+def _get_agent_display(conn, agent_id: str) -> str:
+    row = _exec(conn, "SELECT name, role FROM agents WHERE id=%s", (agent_id,)).fetchone()
     if row is None:
         return agent_id
     return f"{row['name']} ({row['role']})"
 
 
-def _verify_agent_in_team(conn: sqlite3.Connection, agent_id: str, team_id: str) -> None:
-    """Verify that the agent belongs to the team."""
-    row = conn.execute(
-        "SELECT id FROM agents WHERE id=? AND team_id=?", (agent_id, team_id)
+def _verify_agent_in_team(conn, agent_id: str, team_id: str) -> None:
+    row = _exec(
+        conn, "SELECT id FROM agents WHERE id=%s AND team_id=%s", (agent_id, team_id)
     ).fetchone()
     if row is None:
         raise CrossTeamError(agent_id, team_id)
@@ -122,17 +257,12 @@ def _verify_agent_in_team(conn: sqlite3.Connection, agent_id: str, team_id: str)
 
 # ── Notes ─────────────────────────────────────────────────────────────────
 
-def _insert_note(
-    conn: sqlite3.Connection,
-    task_id: str,
-    agent_id: str,
-    content: str,
-    note_type: str = "system",
-) -> dict[str, Any]:
+def _insert_note(conn, task_id: str, agent_id: str, content: str, note_type: str = "system") -> dict[str, Any]:
     note_id = _gen_id("note")
     now = _now()
-    conn.execute(
-        "INSERT INTO notes (id, task_id, agent_id, content, note_type, created_at) VALUES (?,?,?,?,?,?)",
+    _exec(
+        conn,
+        "INSERT INTO notes (id, task_id, agent_id, content, note_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
         (note_id, task_id, agent_id, content, note_type, now),
     )
     return {"id": note_id, "task_id": task_id, "agent_id": agent_id,
@@ -141,24 +271,18 @@ def _insert_note(
 
 # ── Teams ─────────────────────────────────────────────────────────────────
 
-def create_team(conn: sqlite3.Connection, name: str) -> dict[str, Any]:
+def create_team(conn, name: str) -> dict[str, Any]:
     team_id = _gen_id("team")
     now = _now()
-    conn.execute(
-        "INSERT INTO teams (id, name, created_at, config) VALUES (?,?,?,?)",
-        (team_id, name, now, "{}"),
-    )
+    _exec(conn, "INSERT INTO teams (id, name, created_at, config) VALUES (%s,%s,%s,%s)",
+          (team_id, name, now, "{}"))
     conn.commit()
-    return {
-        "id": team_id,
-        "name": name,
-        "created_at": now,
-        "message": f"팀 '{name}'이 생성되었습니다.",
-    }
+    return {"id": team_id, "name": name, "created_at": now,
+            "message": f"팀 '{name}'이 생성되었습니다."}
 
 
-def get_team(conn: sqlite3.Connection, team_id: str) -> dict[str, Any]:
-    row = conn.execute("SELECT * FROM teams WHERE id=?", (team_id,)).fetchone()
+def get_team(conn, team_id: str) -> dict[str, Any]:
+    row = _exec(conn, "SELECT * FROM teams WHERE id=%s", (team_id,)).fetchone()
     if row is None:
         raise NotFoundError("팀", team_id)
     return _row_to_dict(row)
@@ -166,29 +290,19 @@ def get_team(conn: sqlite3.Connection, team_id: str) -> dict[str, Any]:
 
 # ── Agents ────────────────────────────────────────────────────────────────
 
-def add_agent(
-    conn: sqlite3.Connection, team_id: str, name: str, role: str
-) -> dict[str, Any]:
-    get_team(conn, team_id)  # verify team exists
+def add_agent(conn, team_id: str, name: str, role: str) -> dict[str, Any]:
+    get_team(conn, team_id)
     agent_id = _gen_id("agent")
     now = _now()
-    conn.execute(
-        "INSERT INTO agents (id, team_id, name, role, created_at) VALUES (?,?,?,?,?)",
-        (agent_id, team_id, name, role, now),
-    )
+    _exec(conn, "INSERT INTO agents (id, team_id, name, role, created_at) VALUES (%s,%s,%s,%s,%s)",
+          (agent_id, team_id, name, role, now))
     conn.commit()
-    return {
-        "id": agent_id,
-        "team_id": team_id,
-        "name": name,
-        "role": role,
-        "created_at": now,
-        "message": f"에이전트 '{name} ({role})'이 팀에 추가되었습니다.",
-    }
+    return {"id": agent_id, "team_id": team_id, "name": name, "role": role,
+            "created_at": now, "message": f"에이전트 '{name} ({role})'이 팀에 추가되었습니다."}
 
 
-def get_agent(conn: sqlite3.Connection, agent_id: str) -> dict[str, Any]:
-    row = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+def get_agent(conn, agent_id: str) -> dict[str, Any]:
+    row = _exec(conn, "SELECT * FROM agents WHERE id=%s", (agent_id,)).fetchone()
     if row is None:
         raise NotFoundError("에이전트", agent_id)
     return _row_to_dict(row)
@@ -197,7 +311,7 @@ def get_agent(conn: sqlite3.Connection, agent_id: str) -> dict[str, Any]:
 # ── Tasks ─────────────────────────────────────────────────────────────────
 
 def create_task(
-    conn: sqlite3.Connection,
+    conn,
     team_id: str,
     title: str,
     description: str = "",
@@ -205,21 +319,22 @@ def create_task(
     assignee_id: str | None = None,
     creator_agent_id: str | None = None,
 ) -> dict[str, Any]:
-    get_team(conn, team_id)  # verify team exists
+    get_team(conn, team_id)
     task_id = _gen_id("task")
     now = _now()
 
     if assignee_id:
         _verify_agent_in_team(conn, assignee_id, team_id)
 
-    conn.execute(
+    is_blocked_val = False if _is_pg(conn) else 0
+    _exec(
+        conn,
         """INSERT INTO tasks (id, team_id, title, description, status, priority,
            assignee_id, is_blocked, blocker_reason, version, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,0,NULL,1,?,?)""",
-        (task_id, team_id, title, description, "Backlog", priority, assignee_id, now, now),
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL,1,%s,%s)""",
+        (task_id, team_id, title, description, "Backlog", priority, assignee_id, is_blocked_val, now, now),
     )
 
-    # Auto system note: task created
     creator_display = "system"
     if creator_agent_id:
         creator_display = _get_agent_display(conn, creator_agent_id)
@@ -236,31 +351,21 @@ def create_task(
 
     conn.commit()
 
-    assigned_to = None
-    if assignee_id:
-        assigned_to = _get_agent_display(conn, assignee_id)
-
-    return {
-        "id": task_id,
-        "title": title,
-        "status": "Backlog",
-        "priority": priority,
-        "version": 1,
-        "assigned_to": assigned_to,
-        "created_at": now,
-        "message": f"작업 '{title}'이 Backlog에 추가되었습니다.",
-    }
+    assigned_to = _get_agent_display(conn, assignee_id) if assignee_id else None
+    return {"id": task_id, "title": title, "status": "Backlog", "priority": priority,
+            "version": 1, "assigned_to": assigned_to, "created_at": now,
+            "message": f"작업 '{title}'이 Backlog에 추가되었습니다."}
 
 
-def get_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
-    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+def get_task(conn, task_id: str) -> dict[str, Any]:
+    row = _exec(conn, "SELECT * FROM tasks WHERE id=%s", (task_id,)).fetchone()
     if row is None:
         raise NotFoundError("작업", task_id)
     return _row_to_dict(row)
 
 
 def update_task_status(
-    conn: sqlite3.Connection,
+    conn,
     task_id: str,
     new_status: str,
     expected_version: int,
@@ -268,121 +373,84 @@ def update_task_status(
     comment: str | None = None,
 ) -> dict[str, Any]:
     task = get_task(conn, task_id)
-
-    # 1. Validate transition
     validate_transition(task["status"], new_status)
 
-    # 2. WIP limit check
     team = get_team(conn, task["team_id"])
     config = json.loads(team["config"]) if team["config"] else {}
     wip_limits = config.get("wip_limits", {})
     if new_status in wip_limits:
-        current_count = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE team_id=? AND status=?",
+        current_count = _exec(
+            conn,
+            "SELECT COUNT(*) as cnt FROM tasks WHERE team_id=%s AND status=%s",
             (task["team_id"], new_status),
         ).fetchone()["cnt"]
         if current_count >= wip_limits[new_status]:
             raise WipLimitExceededError(new_status, wip_limits[new_status])
 
-    # 3. Optimistic locking
     now = _now()
-    result = conn.execute(
-        "UPDATE tasks SET status=?, version=version+1, updated_at=? WHERE id=? AND version=?",
+    cur = _exec(
+        conn,
+        "UPDATE tasks SET status=%s, version=version+1, updated_at=%s WHERE id=%s AND version=%s",
         (new_status, now, task_id, expected_version),
     )
-    if result.rowcount == 0:
+    if cur.rowcount == 0:
         current = get_task(conn, task_id)
         raise VersionConflictError(current["version"], current["status"])
 
-    # 4. Auto system note
-    agent_display = "system"
-    if agent_id:
-        agent_display = _get_agent_display(conn, agent_id)
+    agent_display = _get_agent_display(conn, agent_id) if agent_id else "system"
     _insert_note(conn, task_id, agent_id or "system",
-                 f"Status changed: {task['status']} → {new_status} by {agent_display}",
-                 "system")
+                 f"Status changed: {task['status']} → {new_status} by {agent_display}", "system")
 
-    # 5. Comment as progress note
     if comment and agent_id:
         _insert_note(conn, task_id, agent_id, comment, "progress")
 
     conn.commit()
-
     updated = get_task(conn, task_id)
-    return {
-        "task_id": task_id,
-        "title": task["title"],
-        "previous_status": task["status"],
-        "new_status": new_status,
-        "version": updated["version"],
-        "updated_at": now,
-        "message": f"상태가 '{task['status']}' → '{new_status}'로 변경되었습니다.",
-    }
+    return {"task_id": task_id, "title": task["title"],
+            "previous_status": task["status"], "new_status": new_status,
+            "version": updated["version"], "updated_at": now,
+            "message": f"상태가 '{task['status']}' → '{new_status}'로 변경되었습니다."}
 
 
-def assign_task(
-    conn: sqlite3.Connection,
-    task_id: str,
-    assignee_id: str,
-    expected_version: int,
-) -> dict[str, Any]:
+def assign_task(conn, task_id: str, assignee_id: str, expected_version: int) -> dict[str, Any]:
     task = get_task(conn, task_id)
     _verify_agent_in_team(conn, assignee_id, task["team_id"])
 
     now = _now()
-    result = conn.execute(
-        "UPDATE tasks SET assignee_id=?, version=version+1, updated_at=? WHERE id=? AND version=?",
+    cur = _exec(
+        conn,
+        "UPDATE tasks SET assignee_id=%s, version=version+1, updated_at=%s WHERE id=%s AND version=%s",
         (assignee_id, now, task_id, expected_version),
     )
-    if result.rowcount == 0:
+    if cur.rowcount == 0:
         current = get_task(conn, task_id)
         raise VersionConflictError(current["version"], current["status"])
 
     assignee_display = _get_agent_display(conn, assignee_id)
-    _insert_note(conn, task_id, assignee_id,
-                 f"Assigned to {assignee_display}", "system")
-
+    _insert_note(conn, task_id, assignee_id, f"Assigned to {assignee_display}", "system")
     conn.commit()
 
     updated = get_task(conn, task_id)
-    return {
-        "task_id": task_id,
-        "title": task["title"],
-        "assigned_to": assignee_display,
-        "version": updated["version"],
-        "message": f"작업이 '{assignee_display}'에게 할당되었습니다.",
-    }
+    return {"task_id": task_id, "title": task["title"],
+            "assigned_to": assignee_display, "version": updated["version"],
+            "message": f"작업이 '{assignee_display}'에게 할당되었습니다."}
 
 
 # ── Notes (public) ────────────────────────────────────────────────────────
 
-def add_note(
-    conn: sqlite3.Connection,
-    task_id: str,
-    agent_id: str,
-    content: str,
-    note_type: str = "progress",
-) -> dict[str, Any]:
+def add_note(conn, task_id: str, agent_id: str, content: str, note_type: str = "progress") -> dict[str, Any]:
     task = get_task(conn, task_id)
     _verify_agent_in_team(conn, agent_id, task["team_id"])
 
     note = _insert_note(conn, task_id, agent_id, content, note_type)
     conn.commit()
 
-    total = conn.execute(
-        "SELECT COUNT(*) as cnt FROM notes WHERE task_id=?", (task_id,)
-    ).fetchone()["cnt"]
-
+    total = _exec(conn, "SELECT COUNT(*) as cnt FROM notes WHERE task_id=%s", (task_id,)).fetchone()["cnt"]
     agent_display = _get_agent_display(conn, agent_id)
     return {
         "task_id": task_id,
-        "note": {
-            "id": note["id"],
-            "agent": agent_display,
-            "content": content,
-            "note_type": note_type,
-            "created_at": note["created_at"],
-        },
+        "note": {"id": note["id"], "agent": agent_display, "content": content,
+                 "note_type": note_type, "created_at": note["created_at"]},
         "total_notes": total,
         "message": f"메모가 추가되었습니다. (총 {total}개)",
     }
@@ -390,13 +458,7 @@ def add_note(
 
 # ── Blocker ───────────────────────────────────────────────────────────────
 
-def flag_blocker(
-    conn: sqlite3.Connection,
-    task_id: str,
-    is_blocked: bool,
-    expected_version: int,
-    reason: str | None = None,
-) -> dict[str, Any]:
+def flag_blocker(conn, task_id: str, is_blocked: bool, expected_version: int, reason: str | None = None) -> dict[str, Any]:
     task = get_task(conn, task_id)
 
     if is_blocked and not reason:
@@ -404,15 +466,17 @@ def flag_blocker(
 
     now = _now()
     blocker_reason = reason if is_blocked else None
-    result = conn.execute(
-        "UPDATE tasks SET is_blocked=?, blocker_reason=?, version=version+1, updated_at=? WHERE id=? AND version=?",
-        (1 if is_blocked else 0, blocker_reason, now, task_id, expected_version),
+    # SQLite: bool → 1/0, PostgreSQL: bool 네이티브
+    is_blocked_val = is_blocked if _is_pg(conn) else (1 if is_blocked else 0)
+    cur = _exec(
+        conn,
+        "UPDATE tasks SET is_blocked=%s, blocker_reason=%s, version=version+1, updated_at=%s WHERE id=%s AND version=%s",
+        (is_blocked_val, blocker_reason, now, task_id, expected_version),
     )
-    if result.rowcount == 0:
+    if cur.rowcount == 0:
         current = get_task(conn, task_id)
         raise VersionConflictError(current["version"], current["status"])
 
-    # Auto system note
     if is_blocked:
         _insert_note(conn, task_id, "system", f"Blocker set: {reason}", "system")
         _insert_note(conn, task_id, "system", reason, "blocker")
@@ -420,231 +484,190 @@ def flag_blocker(
         _insert_note(conn, task_id, "system", "Blocker resolved", "system")
 
     conn.commit()
-
     updated = get_task(conn, task_id)
-    if is_blocked:
-        msg = f"블로커가 설정되었습니다: '{reason}'"
-    else:
-        msg = "블로커가 해제되었습니다."
-
-    return {
-        "task_id": task_id,
-        "title": task["title"],
-        "is_blocked": is_blocked,
-        "blocker_reason": blocker_reason,
-        "version": updated["version"],
-        "message": msg,
-    }
+    msg = f"블로커가 설정되었습니다: '{reason}'" if is_blocked else "블로커가 해제되었습니다."
+    return {"task_id": task_id, "title": task["title"], "is_blocked": is_blocked,
+            "blocker_reason": blocker_reason, "version": updated["version"], "message": msg}
 
 
 # ── Board Queries ─────────────────────────────────────────────────────────
 
-def get_board(conn: sqlite3.Connection, team_id: str) -> dict[str, Any]:
+def get_board(conn, team_id: str) -> dict[str, Any]:
     team = get_team(conn, team_id)
-
     board: dict[str, list] = {s: [] for s in ALL_STATUSES}
     counts: dict[str, int] = {s: 0 for s in ALL_STATUSES}
 
-    tasks = conn.execute(
-        "SELECT * FROM tasks WHERE team_id=? ORDER BY priority DESC, created_at ASC",
-        (team_id,),
-    ).fetchall()
+    sql = """
+        SELECT t.id, t.title, t.status, t.priority, t.is_blocked, t.version,
+               a.name AS agent_name, a.role AS agent_role,
+               (SELECT n.content FROM notes n
+                WHERE n.task_id = t.id AND n.note_type != 'system'
+                ORDER BY n.created_at DESC LIMIT 1) AS latest_note
+        FROM tasks t
+        LEFT JOIN agents a ON t.assignee_id = a.id
+        WHERE t.team_id = %s
+        ORDER BY t.priority DESC, t.created_at ASC
+    """
+    rows = _exec(conn, sql, (team_id,)).fetchall()
 
-    for t in tasks:
-        t = dict(t)
-        status = t["status"]
+    for r in rows:
+        r = dict(r)
+        status = r["status"]
         counts[status] = counts.get(status, 0) + 1
 
-        assigned_to = None
-        if t["assignee_id"]:
-            assigned_to = _get_agent_display(conn, t["assignee_id"])
-
-        # Get latest note
-        latest = conn.execute(
-            "SELECT content FROM notes WHERE task_id=? AND note_type != 'system' ORDER BY created_at DESC LIMIT 1",
-            (t["id"],),
-        ).fetchone()
-
+        assigned_to = f"{r['agent_name']} ({r['agent_role']})" if r["agent_name"] else None
         entry: dict[str, Any] = {
-            "id": t["id"],
-            "title": t["title"],
-            "priority": t["priority"],
-            "assigned_to": assigned_to,
-            "is_blocked": bool(t["is_blocked"]),
-            "version": t["version"],
+            "id": r["id"], "title": r["title"], "priority": r["priority"],
+            "assigned_to": assigned_to, "is_blocked": bool(r["is_blocked"]),
+            "version": r["version"],
         }
-        if latest:
-            entry["latest_note"] = latest["content"]
-
+        if r["latest_note"]:
+            entry["latest_note"] = r["latest_note"]
         board[status].append(entry)
 
     config = json.loads(team["config"]) if team["config"] else {}
     wip_limits = config.get("wip_limits", {})
-    wip_status = {}
-    for s, limit in wip_limits.items():
-        wip_status[s] = f"{counts.get(s, 0)}/{limit}"
+    wip_status = {s: f"{counts.get(s, 0)}/{limit}" for s, limit in wip_limits.items()}
 
-    return {
-        "team": team["name"],
-        "counts": counts,
-        "board": board,
-        "wip_status": wip_status,
-        "updated_at": _now(),
-    }
+    return {"team": team["name"], "counts": counts, "board": board,
+            "wip_status": wip_status, "updated_at": _now()}
 
 
-def get_task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
-    task = get_task(conn, task_id)
-    team = get_team(conn, task["team_id"])
+def get_task_detail(conn, task_id: str) -> dict[str, Any]:
+    # task + team + assignee를 JOIN 1회로 조회
+    detail_sql = """
+        SELECT t.*, tm.id AS team_pk, tm.name AS team_name,
+               a.id AS agent_pk, a.name AS agent_name, a.role AS agent_role
+        FROM tasks t
+        JOIN teams tm ON t.team_id = tm.id
+        LEFT JOIN agents a ON t.assignee_id = a.id
+        WHERE t.id = %s
+    """
+    row = _exec(conn, detail_sql, (task_id,)).fetchone()
+    if row is None:
+        raise NotFoundError("작업", task_id)
+    task = dict(row)
 
     assigned_to = None
-    if task["assignee_id"]:
-        agent = get_agent(conn, task["assignee_id"])
-        assigned_to = {"id": agent["id"], "name": agent["name"], "role": agent["role"]}
+    if task["agent_pk"]:
+        assigned_to = {"id": task["agent_pk"], "name": task["agent_name"], "role": task["agent_role"]}
 
-    notes_rows = conn.execute(
-        "SELECT * FROM notes WHERE task_id=? ORDER BY created_at ASC",
-        (task_id,),
-    ).fetchall()
-
+    # notes + agent display를 JOIN 1회로 조회
+    notes_sql = """
+        SELECT n.id, n.content, n.note_type, n.created_at, n.agent_id,
+               ag.name AS agent_name, ag.role AS agent_role
+        FROM notes n
+        LEFT JOIN agents ag ON n.agent_id = ag.id
+        WHERE n.task_id = %s
+        ORDER BY n.created_at ASC
+    """
     notes = []
-    for n in notes_rows:
+    for n in _exec(conn, notes_sql, (task_id,)).fetchall():
         n = dict(n)
-        agent_display = "system"
-        if n["agent_id"] != "system":
-            try:
-                agent_display = _get_agent_display(conn, n["agent_id"])
-            except Exception:
-                agent_display = n["agent_id"]
-        notes.append({
-            "id": n["id"],
-            "agent": agent_display,
-            "content": n["content"],
-            "note_type": n["note_type"],
-            "created_at": n["created_at"],
-        })
+        if n["agent_name"]:
+            agent_display = f"{n['agent_name']} ({n['agent_role']})"
+        elif n["agent_id"] == "system":
+            agent_display = "system"
+        else:
+            agent_display = n["agent_id"]
+        notes.append({"id": n["id"], "agent": agent_display, "content": n["content"],
+                      "note_type": n["note_type"], "created_at": n["created_at"]})
 
-    return {
-        "id": task["id"],
-        "title": task["title"],
-        "description": task["description"],
-        "status": task["status"],
-        "priority": task["priority"],
-        "is_blocked": bool(task["is_blocked"]),
-        "blocker_reason": task["blocker_reason"],
-        "version": task["version"],
-        "assigned_to": assigned_to,
-        "team": {"id": team["id"], "name": team["name"]},
-        "notes": notes,
-        "created_at": task["created_at"],
-        "updated_at": task["updated_at"],
-    }
+    return {"id": task["id"], "title": task["title"], "description": task["description"],
+            "status": task["status"], "priority": task["priority"],
+            "is_blocked": bool(task["is_blocked"]), "blocker_reason": task["blocker_reason"],
+            "version": task["version"], "assigned_to": assigned_to,
+            "team": {"id": task["team_pk"], "name": task["team_name"]}, "notes": notes,
+            "created_at": task["created_at"], "updated_at": task["updated_at"]}
 
 
-def get_team_status(
-    conn: sqlite3.Connection, team_id: str, activity_hours: int = 24
-) -> dict[str, Any]:
+def get_team_status(conn, team_id: str, activity_hours: int = 24) -> dict[str, Any]:
     team = get_team(conn, team_id)
 
-    # Summary counts
+    # 1) 상태별 카운트 (1회)
     summary = {s: 0 for s in ALL_STATUSES}
-    rows = conn.execute(
-        "SELECT status, COUNT(*) as cnt FROM tasks WHERE team_id=? GROUP BY status",
-        (team_id,),
-    ).fetchall()
+    rows = _exec(conn, "SELECT status, COUNT(*) as cnt FROM tasks WHERE team_id=%s GROUP BY status", (team_id,)).fetchall()
     for r in rows:
         summary[r["status"]] = r["cnt"]
 
-    # Agent workloads
-    agents_rows = conn.execute(
-        "SELECT * FROM agents WHERE team_id=?", (team_id,)
-    ).fetchall()
-
+    # 2) 에이전트별 워크로드 — LEFT JOIN + GROUP BY (1회)
+    agents_sql = """
+        SELECT a.name, a.role,
+               COALESCE(SUM(CASE WHEN t.status = 'InProgress' THEN 1 ELSE 0 END), 0) AS in_progress,
+               COUNT(t.id) AS total
+        FROM agents a
+        LEFT JOIN tasks t ON t.assignee_id = a.id
+        WHERE a.team_id = %s
+        GROUP BY a.id, a.name, a.role
+    """
     agents = []
-    for a in agents_rows:
+    for a in _exec(conn, agents_sql, (team_id,)).fetchall():
         a = dict(a)
-        in_progress = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE assignee_id=? AND status='InProgress'",
-            (a["id"],),
-        ).fetchone()["cnt"]
-        total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE assignee_id=?",
-            (a["id"],),
-        ).fetchone()["cnt"]
-        agents.append({
-            "name": a["name"],
-            "role": a["role"],
-            "in_progress": in_progress,
-            "total": total,
-        })
+        agents.append({"name": a["name"], "role": a["role"],
+                        "in_progress": a["in_progress"], "total": a["total"]})
 
-    # Blockers
-    blocker_rows = conn.execute(
-        "SELECT * FROM tasks WHERE team_id=? AND is_blocked=1",
-        (team_id,),
-    ).fetchall()
+    # 3) 블로커 — LEFT JOIN agents (1회)
+    blocker_sql = """
+        SELECT t.id, t.title, t.blocker_reason,
+               a.name AS agent_name, a.role AS agent_role
+        FROM tasks t
+        LEFT JOIN agents a ON t.assignee_id = a.id
+        WHERE t.team_id = %s AND t.is_blocked = %s
+    """
+    is_blocked_val = True if _is_pg(conn) else 1
     blockers = []
-    for b in blocker_rows:
+    for b in _exec(conn, blocker_sql, (team_id, is_blocked_val)).fetchall():
         b = dict(b)
-        assigned_to = None
-        if b["assignee_id"]:
-            assigned_to = _get_agent_display(conn, b["assignee_id"])
-        blockers.append({
-            "task_id": b["id"],
-            "title": b["title"],
-            "reason": b["blocker_reason"],
-            "assigned_to": assigned_to,
-        })
+        assigned_to = f"{b['agent_name']} ({b['agent_role']})" if b["agent_name"] else None
+        blockers.append({"task_id": b["id"], "title": b["title"],
+                         "reason": b["blocker_reason"], "assigned_to": assigned_to})
 
-    # Recent activity (from notes)
-    recent_notes = conn.execute(
-        """SELECT n.*, t.title as task_title
-           FROM notes n JOIN tasks t ON n.task_id = t.id
-           WHERE t.team_id=? AND n.note_type='system'
-           AND n.created_at >= datetime('now', ?)
-           ORDER BY n.created_at DESC LIMIT 20""",
-        (team_id, f"-{activity_hours} hours"),
-    ).fetchall()
+    # 4) 최근 활동 — JOIN tasks + LEFT JOIN agents (1회)
+    if _is_pg(conn):
+        time_sql = """SELECT n.content, n.agent_id, n.created_at, t.title AS task_title,
+                             a.name AS agent_name
+                      FROM notes n
+                      JOIN tasks t ON n.task_id = t.id
+                      LEFT JOIN agents a ON n.agent_id = a.id
+                      WHERE t.team_id=%s AND n.note_type='system'
+                      AND n.created_at >= NOW() - INTERVAL %s
+                      ORDER BY n.created_at DESC LIMIT 20"""
+        time_params = (team_id, f"{activity_hours} hours")
+    else:
+        time_sql = """SELECT n.content, n.agent_id, n.created_at, t.title AS task_title,
+                             a.name AS agent_name
+                      FROM notes n
+                      JOIN tasks t ON n.task_id = t.id
+                      LEFT JOIN agents a ON n.agent_id = a.id
+                      WHERE t.team_id=%s AND n.note_type='system'
+                      AND n.created_at >= datetime('now', %s)
+                      ORDER BY n.created_at DESC LIMIT 20"""
+        time_params = (team_id, f"-{activity_hours} hours")
 
     recent_activity = []
-    for rn in recent_notes:
+    for rn in _exec(conn, time_sql, time_params).fetchall():
         rn = dict(rn)
-        agent_name = "system"
-        if rn["agent_id"] != "system":
-            try:
-                agent_name = _get_agent_display(conn, rn["agent_id"]).split(" (")[0]
-            except Exception:
-                agent_name = rn["agent_id"]
+        agent_name = rn["agent_name"] if rn["agent_name"] else ("system" if rn["agent_id"] == "system" else rn["agent_id"])
         recent_activity.append({
             "agent": agent_name,
             "action": "status_change" if "Status changed" in rn["content"] else "update",
-            "task": rn["task_title"],
-            "detail": rn["content"],
-            "at": rn["created_at"],
+            "task": rn["task_title"], "detail": rn["content"], "at": rn["created_at"],
         })
 
-    return {
-        "team": team["name"],
-        "summary": summary,
-        "agents": agents,
-        "blockers": blockers,
-        "recent_activity": recent_activity,
-    }
+    return {"team": team["name"], "summary": summary, "agents": agents,
+            "blockers": blockers, "recent_activity": recent_activity}
 
 
 # ── Board Markdown (for Resources) ───────────────────────────────────────
 
-def get_board_markdown(conn: sqlite3.Connection, team_id: str) -> str:
+def get_board_markdown(conn, team_id: str) -> str:
     data = get_board(conn, team_id)
     lines = [f"# {data['team']} - Kanban Board\n"]
 
     for status in ALL_STATUSES:
         tasks = data["board"][status]
         count = data["counts"][status]
-        wip_info = ""
-        if status in data["wip_status"]:
-            wip_info = f" [WIP: {data['wip_status'][status]}]"
-
+        wip_info = f" [WIP: {data['wip_status'][status]}]" if status in data["wip_status"] else ""
         lines.append(f"## {status} ({count}){wip_info}")
 
         if not tasks:
@@ -656,53 +679,44 @@ def get_board_markdown(conn: sqlite3.Connection, team_id: str) -> str:
             lines.append("| ID | 작업 | 우선순위 | 담당자 | 최근 메모 | v |")
             lines.append("|----|------|---------|--------|----------|---|")
             for t in tasks:
-                note = t.get("latest_note", "")
                 blocked = " **[BLOCKED]**" if t["is_blocked"] else ""
-                lines.append(
-                    f"| {t['id']} | {t['title']}{blocked} | {t['priority']} "
-                    f"| {t['assigned_to'] or '-'} | {note} | {t['version']} |"
-                )
+                lines.append(f"| {t['id']} | {t['title']}{blocked} | {t['priority']} "
+                             f"| {t['assigned_to'] or '-'} | {t.get('latest_note', '')} | {t['version']} |")
         else:
             lines.append("| ID | 작업 | 우선순위 | 담당자 | v |")
             lines.append("|----|------|---------|--------|---|")
             for t in tasks:
                 blocked = " **[BLOCKED]**" if t["is_blocked"] else ""
-                lines.append(
-                    f"| {t['id']} | {t['title']}{blocked} | {t['priority']} "
-                    f"| {t['assigned_to'] or '-'} | {t['version']} |"
-                )
+                lines.append(f"| {t['id']} | {t['title']}{blocked} | {t['priority']} "
+                             f"| {t['assigned_to'] or '-'} | {t['version']} |")
         lines.append("")
 
     lines.append(f"최종 업데이트: {data['updated_at']}")
     return "\n".join(lines)
 
 
-def get_agents_markdown(conn: sqlite3.Connection, team_id: str) -> str:
+def get_agents_markdown(conn, team_id: str) -> str:
     team = get_team(conn, team_id)
-    agents_rows = conn.execute(
-        "SELECT * FROM agents WHERE team_id=?", (team_id,)
-    ).fetchall()
+
+    is_blocked_val = True if _is_pg(conn) else 1
+    sql = """
+        SELECT a.name, a.role,
+               COALESCE(SUM(CASE WHEN t.status = 'InProgress' THEN 1 ELSE 0 END), 0) AS in_progress,
+               COUNT(t.id) AS total,
+               COALESCE(SUM(CASE WHEN t.is_blocked = %s THEN 1 ELSE 0 END), 0) AS blockers
+        FROM agents a
+        LEFT JOIN tasks t ON t.assignee_id = a.id
+        WHERE a.team_id = %s
+        GROUP BY a.id, a.name, a.role
+    """
+    rows = _exec(conn, sql, (is_blocked_val, team_id)).fetchall()
 
     lines = [f"# {team['name']} - Agents\n"]
     lines.append("| 에이전트 | 역할 | 진행 중 | 전체 | 블로커 |")
     lines.append("|---------|------|---------|------|--------|")
 
-    for a in agents_rows:
+    for a in rows:
         a = dict(a)
-        in_progress = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE assignee_id=? AND status='InProgress'",
-            (a["id"],),
-        ).fetchone()["cnt"]
-        total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE assignee_id=?",
-            (a["id"],),
-        ).fetchone()["cnt"]
-        blockers = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE assignee_id=? AND is_blocked=1",
-            (a["id"],),
-        ).fetchone()["cnt"]
-        lines.append(
-            f"| {a['name']} | {a['role']} | {in_progress} | {total} | {blockers} |"
-        )
+        lines.append(f"| {a['name']} | {a['role']} | {a['in_progress']} | {a['total']} | {a['blockers']} |")
 
     return "\n".join(lines)

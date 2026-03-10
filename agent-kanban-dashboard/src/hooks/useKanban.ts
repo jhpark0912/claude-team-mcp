@@ -23,7 +23,7 @@ export function useTeams() {
   return { teams, loading };
 }
 
-export function useBoard(teamId: string | null, intervalMs = 5000) {
+export function useBoard(teamId: string | null, intervalMs = 15000) {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [loading, setLoading] = useState(true);
 

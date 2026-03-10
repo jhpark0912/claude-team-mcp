@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import mimetypes
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
@@ -19,13 +18,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import (
-    DB_PATH,
+    _exec,
     get_board,
     get_connection,
+    get_pooled_connection,
     get_task_detail,
     get_team,
     get_team_status,
     init_db,
+    return_pooled_connection,
 )
 from .models import NotFoundError
 
@@ -44,13 +45,13 @@ app.add_middleware(
 
 
 @contextmanager
-def get_readonly_conn() -> Generator[sqlite3.Connection, None, None]:
-    """읽기 전용 DB 연결."""
-    conn = get_connection(DB_PATH)
+def get_readonly_conn() -> Generator[Any, None, None]:
+    """읽기 전용 DB 연결 (PostgreSQL은 커넥션 풀 사용)."""
+    conn = get_pooled_connection()
     try:
         yield conn
     finally:
-        conn.close()
+        return_pooled_connection(conn)
 
 
 # ── Teams ────────────────────────────────────────────────────────────────
@@ -60,8 +61,8 @@ def get_readonly_conn() -> Generator[sqlite3.Connection, None, None]:
 def list_teams() -> list[dict[str, Any]]:
     """모든 팀 목록 조회."""
     with get_readonly_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, name, created_at FROM teams ORDER BY created_at ASC"
+        rows = _exec(
+            conn, "SELECT id, name, created_at FROM teams ORDER BY created_at ASC"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -135,7 +136,7 @@ PORT = 48080
 if __name__ == "__main__":
     import uvicorn
 
-    conn = get_connection(DB_PATH)
+    conn = get_connection()
     init_db(conn)
     conn.close()
     uvicorn.run(app, host="127.0.0.1", port=PORT)

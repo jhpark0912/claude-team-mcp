@@ -22,9 +22,21 @@ mcp = FastMCP(
 _conn = None
 
 
+def _is_conn_alive(conn) -> bool:
+    """커넥션이 살아있는지 확인."""
+    try:
+        if db._is_pg(conn):
+            return conn.closed == 0
+        else:
+            conn.execute("SELECT 1")
+            return True
+    except Exception:
+        return False
+
+
 def _get_conn():
     global _conn
-    if _conn is None:
+    if _conn is None or not _is_conn_alive(_conn):
         _conn = db.get_connection()
         db.init_db(_conn)
     return _conn
@@ -299,8 +311,9 @@ def kanban_system_prompt(team_id: str, agent_id: str) -> str:
         board_data = db.get_board(conn, team_id)
 
         # Agent's tasks
-        my_tasks = conn.execute(
-            "SELECT id, title, status, version FROM tasks WHERE assignee_id=? AND status NOT IN ('Done','Rejected')",
+        my_tasks = db._exec(
+            conn,
+            "SELECT id, title, status, version FROM tasks WHERE assignee_id=%s AND status NOT IN ('Done','Rejected')",
             (agent_id,),
         ).fetchall()
         my_tasks_str = "\n".join(
@@ -308,8 +321,9 @@ def kanban_system_prompt(team_id: str, agent_id: str) -> str:
         ) or "  없음"
 
         counts = board_data["counts"]
-        blockers_count = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE team_id=? AND is_blocked=1",
+        blockers_count = db._exec(
+            conn,
+            "SELECT COUNT(*) as cnt FROM tasks WHERE team_id=%s AND is_blocked=TRUE",
             (team_id,),
         ).fetchone()["cnt"]
 
@@ -415,9 +429,10 @@ def task_completion_prompt(task_id: str, agent_id: str) -> str:
         agent = db.get_agent(conn, agent_id)
 
         # Find next priority task for this agent
-        next_task = conn.execute(
+        next_task = db._exec(
+            conn,
             """SELECT title, priority FROM tasks
-               WHERE assignee_id=? AND status='Todo'
+               WHERE assignee_id=%s AND status='Todo'
                ORDER BY
                  CASE priority WHEN 'Critical' THEN 0 WHEN 'High' THEN 1
                               WHEN 'Medium' THEN 2 WHEN 'Low' THEN 3 END
