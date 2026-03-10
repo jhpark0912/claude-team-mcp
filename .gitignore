@@ -29,6 +29,7 @@ __pycache__/
 
 # Database (local dev)
 *.db
+*.db_bak
 
 # Logs
 *.log
