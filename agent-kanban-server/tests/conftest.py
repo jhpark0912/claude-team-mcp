@@ -9,10 +9,11 @@ from agent_kanban import db
 
 
 @pytest.fixture
-def conn(tmp_path: Path):
+def conn(tmp_path: Path, monkeypatch):
     """Create a fresh in-memory DB connection for each test."""
     test_db = tmp_path / "test_kanban.db"
-    connection = db.get_connection(test_db)
+    monkeypatch.setattr(db, "SQLITE_PATH", test_db)
+    connection = db.get_connection()
     db.init_db(connection)
     yield connection
     connection.close()

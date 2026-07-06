@@ -10,10 +10,11 @@ import agent_kanban.server as server_module
 
 
 @pytest.fixture(autouse=True)
-def reset_conn(tmp_path):
+def reset_conn(tmp_path, monkeypatch):
     """Reset the server connection for each test."""
     test_db = tmp_path / "test_server.db"
-    conn = db.get_connection(test_db)
+    monkeypatch.setattr(db, "SQLITE_PATH", test_db)
+    conn = db.get_connection()
     db.init_db(conn)
     server_module._conn = conn
     yield conn
