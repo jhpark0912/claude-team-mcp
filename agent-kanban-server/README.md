@@ -1,7 +1,7 @@
 # AI-Board MCP Server
 
 Claude Agent Teams 협업을 위한 AI-Board MCP 서버.
-에이전트들이 작업 진행 상황을 DB에 기록하고, 대시보드에서 시각적으로 확인할 수 있다.
+에이전트들이 작업 진행 상황을 DB에 기록하고, 대시보드(session_board)에서 시각적으로 확인할 수 있다.
 
 ## 아키텍처
 
@@ -9,10 +9,8 @@ Claude Agent Teams 협업을 위한 AI-Board MCP 서버.
 [로컬 모드]
 Claude Agent Teams
     │
-    ├─ [stdio] ──→ MCP Server (server.py) ──→ SQLite DB (kanban.db, 로컬)
-    │                10 Tools / 3 Resources / 5 Prompts
-    │
-    └─ [browser] ──→ Dashboard (web.py:48080)  ──→ SQLite DB (read-only)
+    └─ [stdio] ──→ MCP Server (server.py) ──→ SQLite DB (kanban.db, 로컬)
+                     10 Tools / 3 Resources / 5 Prompts
 
 [클라우드 공유 모드]
 Claude Agent A (PC-1) ──┐
@@ -24,7 +22,7 @@ Claude Agent C (PC-3) ──┘
 - **DB 모드**: `KANBAN_DB_HOST` 환경변수 설정 여부로 자동 분기
   - 미설정 → SQLite 로컬 모드 (기본값, 설정 불필요)
   - 설정 → PostgreSQL 클라우드 모드 (여러 PC가 동일 DB 공유)
-- **대시보드**: 별도 프로세스로 실행. 같은 DB를 읽기 전용으로 조회하여 칸반보드 표시
+- **대시보드**: `session_board`(Claude Session Dashboard)의 '칸반' 탭이 같은 DB를 읽기 전용으로 조회하여 칸반보드 표시
 
 ---
 
@@ -36,9 +34,7 @@ cd agent-kanban-server
 uv sync
 
 # MCP 서버 → Claude Code가 자동 실행 (수동 실행 불필요)
-# 대시보드 → 별도 터미널에서 실행
-uv run python -m agent_kanban.web
-# → http://localhost:48080 접속
+# 대시보드 → session_board(Claude Session Dashboard)의 '칸반' 탭에서 조회
 
 # 테스트
 uv run pytest tests/ -v
@@ -492,40 +488,15 @@ Todo → Backlog (우선순위 재조정)
 
 ## 대시보드
 
-### 운영 모드 (프로세스 1개)
+대시보드 뷰잉은 **`session_board`(Claude Session Dashboard)의 '칸반' 탭**으로 완전 이전되었다.
+기존 `web.py`(:48080 FastAPI 정적 서빙 + 읽기 REST API)와 `agent-kanban-dashboard`(React) 프로젝트는 폐기되었다.
 
-```bash
-uv run python -m agent_kanban.web
-# → http://localhost:48080
-```
+- session_board Express가 같은 칸반 DB를 **읽기 전용**으로 조회한다 (`/api/kanban/*`).
+  db.py의 듀얼모드(SQLite/PostgreSQL) 쿼리를 Node로 미러링.
+- 칸반 DB에 도달 불가한 환경에서는 '칸반' 탭이 노출되지 않는다 (fail-closed).
+- MCP 서버(`server.py`)의 쓰기·읽기 도구는 그대로 유지된다 — 이 폐기는 뷰잉 서버에만 해당.
 
-`web.py`가 REST API + 빌드된 대시보드(dist/)를 함께 서빙.
-DB 데이터가 변경되어도 재빌드 불필요 (JS가 런타임에 API 폴링).
-
-### 개발 모드 (UI 수정 시)
-
-```bash
-# 터미널 1: API 서버
-uv run python -m agent_kanban.web
-
-# 터미널 2: Vite HMR
-cd ../agent-kanban-dashboard
-npm run dev
-# → http://localhost:5173 (HMR 핫리로드)
-
-# 수정 완료 후 빌드
-npm run build
-# → dist/ 갱신, 운영 모드로 복귀
-```
-
-### REST API 엔드포인트 (읽기 전용)
-
-| Method | Path | 설명 |
-|--------|------|------|
-| GET | `/api/teams` | 팀 목록 |
-| GET | `/api/board/{team_id}` | 칸반보드 (상태별 그룹) |
-| GET | `/api/tasks/{task_id}` | 태스크 상세 + 노트 |
-| GET | `/api/team-status/{team_id}` | 팀 통계 + 워크로드 |
+읽기 REST API(팀/보드/태스크/팀상태)는 session_board `/api/kanban/*`가 담당한다.
 
 ---
 
