@@ -262,4 +262,4 @@ Task 3 (환경변수 정리)  ────────────────�
 - [ ] `create_task` / `update_task_status` 정상 동작
 - [ ] `add_note` / `flag_blocker` 정상 동작
 - [ ] 옵티미스틱 락킹 (`version` 충돌) 정상 작동
-- [ ] `get_team_status` 활동 시간 필터 정상 작동 (`INTERVAL`)
+- [ ] `get_project_status` 활동 시간 필터 정상 작동 (`INTERVAL`)

@@ -9,25 +9,27 @@ from agent_kanban import db
 
 
 @pytest.fixture
-def conn(tmp_path: Path):
+def conn(tmp_path: Path, monkeypatch):
     """Create a fresh in-memory DB connection for each test."""
     test_db = tmp_path / "test_kanban.db"
-    connection = db.get_connection(test_db)
+    monkeypatch.setattr(db, "SQLITE_PATH", test_db)
+    connection = db.get_connection()
     db.init_db(connection)
+    db.migrate_db(connection)
     yield connection
     connection.close()
 
 
 @pytest.fixture
-def team(conn):
-    """Create a test team."""
-    return db.create_team(conn, "Test Team")
+def project(conn):
+    """Create a test project."""
+    return db.init_project(conn, "Test Project")
 
 
 @pytest.fixture
-def agents(conn, team):
+def agents(conn, project):
     """Create test agents: alice (PM), bob (Developer), charlie (Reviewer)."""
-    alice = db.add_agent(conn, team["id"], "Alice", "PM")
-    bob = db.add_agent(conn, team["id"], "Bob", "Developer")
-    charlie = db.add_agent(conn, team["id"], "Charlie", "Reviewer")
+    alice = db.add_agent(conn, project["id"], "Alice", "PM")
+    bob = db.add_agent(conn, project["id"], "Bob", "Developer")
+    charlie = db.add_agent(conn, project["id"], "Charlie", "Reviewer")
     return {"alice": alice, "bob": bob, "charlie": charlie}

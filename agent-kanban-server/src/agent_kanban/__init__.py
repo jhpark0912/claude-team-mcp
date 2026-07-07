@@ -1,1 +1,1 @@
-"""Agent Kanban MCP Server - Kanban board for Claude Agent Teams collaboration."""
+"""Agent Kanban MCP Server - Kanban workflow engine for a single Claude session."""

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "agent-kanban": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}/agent-kanban-server",
+        "python",
+        "-m",
+        "agent_kanban"
+      ]
+    }
+  }
+}

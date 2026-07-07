@@ -1,0 +1,14 @@
+{
+  "name": "ai-board",
+  "owner": {
+    "name": "JH.PARK"
+  },
+  "description": "AI-Board 칸반 워크플로우 플러그인 배포처 (커맨드 + MCP 서버)",
+  "plugins": [
+    {
+      "name": "ai-board",
+      "source": "./",
+      "description": "칸반 워크플로우 커맨드(/plan·/plan-run·/retro·/resume) + agent-kanban MCP 서버 번들"
+    }
+  ]
+}

@@ -65,7 +65,7 @@ def validate_transition(current: str, new: str) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────────────
 
-class TeamModel(BaseModel):
+class ProjectModel(BaseModel):
     id: str
     name: str
     created_at: str
@@ -74,7 +74,7 @@ class TeamModel(BaseModel):
 
 class AgentModel(BaseModel):
     id: str
-    team_id: str
+    project_id: str
     name: str
     role: str
     created_at: str
@@ -82,7 +82,7 @@ class AgentModel(BaseModel):
 
 class TaskModel(BaseModel):
     id: str
-    team_id: str
+    project_id: str
     title: str
     description: str = ""
     status: str = "Backlog"
@@ -153,12 +153,12 @@ class WipLimitExceededError(KanbanError):
         )
 
 
-class CrossTeamError(KanbanError):
-    def __init__(self, agent_id: str, team_id: str):
+class CrossProjectError(KanbanError):
+    def __init__(self, agent_id: str, project_id: str):
         super().__init__(
-            error_code="CROSS_TEAM_ERROR",
-            message=f"에이전트 '{agent_id}'는 팀 '{team_id}'에 소속되지 않았습니다.",
-            details={"agent_id": agent_id, "team_id": team_id},
+            error_code="CROSS_PROJECT_ERROR",
+            message=f"에이전트 '{agent_id}'는 프로젝트 '{project_id}'에 소속되지 않았습니다.",
+            details={"agent_id": agent_id, "project_id": project_id},
         )
 
 

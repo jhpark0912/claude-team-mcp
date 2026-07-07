@@ -30,6 +30,9 @@ __pycache__/
 # Database (local dev)
 *.db
 *.db_bak
+*.db.bak-*
+*.db-shm
+*.db-wal
 
 # Logs
 *.log
@@ -38,3 +41,4 @@ __pycache__/
 # Lock files (keep package-lock.json, uv.lock)
 .claude/*
 !.claude/commands/
+!.claude/docs/

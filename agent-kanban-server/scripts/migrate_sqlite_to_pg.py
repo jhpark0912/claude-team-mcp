@@ -34,10 +34,10 @@ PG_CONFIG = {
     "dbname": os.environ.get("KANBAN_DB_NAME", "ai_board"),
 }
 
-TABLES_ORDER = ["teams", "agents", "tasks", "notes"]
+TABLES_ORDER = ["projects", "agents", "tasks", "notes"]
 
 PG_SCHEMA = """
-CREATE TABLE IF NOT EXISTS teams (
+CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     created_at  TIMESTAMP DEFAULT NOW(),
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS teams (
 
 CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id),
+    project_id     TEXT NOT NULL REFERENCES projects(id),
     name        TEXT NOT NULL,
     role        TEXT NOT NULL DEFAULT 'Developer'
                 CHECK(role IN ('PM','Developer','Reviewer','Tester','Designer')),
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE TABLE IF NOT EXISTS tasks (
     id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id),
+    project_id     TEXT NOT NULL REFERENCES projects(id),
     title       TEXT NOT NULL,
     description TEXT DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'Backlog'
@@ -122,21 +122,21 @@ def init_pg_schema(pg_conn) -> None:
 
 
 INSERT_SQL = {
-    "teams": """
-        INSERT INTO teams (id, name, created_at, config)
+    "projects": """
+        INSERT INTO projects (id, name, created_at, config)
         VALUES (%(id)s, %(name)s, %(created_at)s, %(config)s)
         ON CONFLICT (id) DO NOTHING
     """,
     "agents": """
-        INSERT INTO agents (id, team_id, name, role, created_at)
-        VALUES (%(id)s, %(team_id)s, %(name)s, %(role)s, %(created_at)s)
+        INSERT INTO agents (id, project_id, name, role, created_at)
+        VALUES (%(id)s, %(project_id)s, %(name)s, %(role)s, %(created_at)s)
         ON CONFLICT (id) DO NOTHING
     """,
     "tasks": """
-        INSERT INTO tasks (id, team_id, title, description, status, priority,
+        INSERT INTO tasks (id, project_id, title, description, status, priority,
                            assignee_id, is_blocked, blocker_reason, version,
                            created_at, updated_at)
-        VALUES (%(id)s, %(team_id)s, %(title)s, %(description)s, %(status)s,
+        VALUES (%(id)s, %(project_id)s, %(title)s, %(description)s, %(status)s,
                 %(priority)s, %(assignee_id)s, %(is_blocked)s, %(blocker_reason)s,
                 %(version)s, %(created_at)s, %(updated_at)s)
         ON CONFLICT (id) DO NOTHING
