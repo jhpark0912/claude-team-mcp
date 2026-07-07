@@ -3,9 +3,7 @@
   "owner": {
     "name": "JH.PARK"
   },
-  "metadata": {
-    "description": "AI-Board 칸반 워크플로우 플러그인 배포처 (커맨드 + MCP 서버)"
-  },
+  "description": "AI-Board 칸반 워크플로우 플러그인 배포처 (커맨드 + MCP 서버)",
   "plugins": [
     {
       "name": "ai-board",
