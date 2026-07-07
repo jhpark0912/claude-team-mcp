@@ -1,7 +1,7 @@
 # AI-Board MCP Server
 
 칸반 보드를 워크플로우 엔진으로 쓰는 AI-Board MCP 서버.
-`/plan`(기획) → `/team-run`(구현·자체QA·리뷰·Done 자율 순환) → `/retro`(회고·교훈 승격) →
+`/plan`(기획) → `/plan-run`(구현·자체QA·리뷰·Done 자율 순환) → `/retro`(회고·교훈 승격) →
 `/resume`(세션 복원) 4개 커맨드가 이 서버 위에서 동작하며, 진행 상황과 판단 근거는
 전부 DB(태스크/노트)에 남아 대시보드(session_board)에서 확인할 수 있다.
 
@@ -16,7 +16,7 @@
 Claude Code (단일 세션)
     │
     └─ [stdio] ──→ MCP Server (server.py) ──→ SQLite DB (kanban.db, 로컬)
-                     10 Tools / 3 Resources / 5 Prompts
+                     13 Tools / 3 Resources / 5 Prompts
 
 [클라우드 공유 모드 — 동일 사용자의 여러 PC 동기화용, 동시 병렬 작업 목적 아님]
 Claude Code (PC-1) ──┐
@@ -160,7 +160,7 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 {
   "permissions": {
     "allow": [
-      "mcp__agent-kanban__create_team",
+      "mcp__agent-kanban__init_project",
       "mcp__agent-kanban__add_agent",
       "mcp__agent-kanban__create_task",
       "mcp__agent-kanban__update_task_status",
@@ -169,7 +169,7 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
       "mcp__agent-kanban__flag_blocker",
       "mcp__agent-kanban__get_board",
       "mcp__agent-kanban__get_task_detail",
-      "mcp__agent-kanban__get_team_status"
+      "mcp__agent-kanban__get_project_status"
     ]
   }
 }
@@ -196,19 +196,19 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 
 ## 워크플로우
 - 기획: `/plan <요구사항>` — 인터뷰 → 완료조건 포함 태스크 분해 → 승인 → 보드 등록
-- 실행: `/clear` 후 새 세션에서 `/team-run` — 구현 → 자체 QA → 리뷰 → Done 자율 순환
+- 실행: `/clear` 후 새 세션에서 `/plan-run` — 구현 → 자체 QA → 리뷰 → Done 자율 순환
 - 복원: `/resume` — 최신 handoff 노트 기준 컨텍스트 복원
 - 회고: `/retro` — 보드 데이터로 리뷰 실효성·프로세스 마찰·우회 측정
 ```
 
-`.claude/docs/kanban.md`에는 팀 ID·에이전트 ID를 기록해둔다 (아래 "팀 구성" 참조).
+`.claude/docs/kanban.md`에는 프로젝트 ID·에이전트 ID를 기록해둔다 (아래 "프로젝트 준비" 참조).
 이 파일이 있어야 `/clear` 후에도 커맨드들이 ID를 다시 찾을 필요가 없다.
 
 ### 핵심 포인트
 
 | 항목 | 설명 |
 |------|------|
-| kanban.md 강제 참조 | 매 대화마다 팀/에이전트 ID를 다시 묻지 않도록 강제 |
+| kanban.md 강제 참조 | 매 대화마다 프로젝트/에이전트 ID를 다시 묻지 않도록 강제 |
 | 커맨드 4개로 워크플로우 고정 | 기획·실행·복원·회고 각각을 시스템 프롬프트가 아니라 명시적 커맨드로 분리 |
 | 금지사항 명시 | DB 직접 수정, 모호함 추론 등 반복되는 실수를 규칙으로 차단 |
 
@@ -231,9 +231,9 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 4. **계획 문서 저장 + 보드 등록**: `.claude/docs/plans/plan-YYYYMMDD-<주제>.md`에 "왜와 경계"를
    저장하고, 승인된 태스크만 `create_task`
 
-### /team-run — 실행 (구현 → 자체 QA → 리뷰 → Done 자율 순환)
+### /plan-run — 실행 (구현 → 자체 QA → 리뷰 → Done 자율 순환)
 
-`.claude/commands/team-run.md`. `/plan`으로 등록된 태스크를 순차로(동시에 하나씩) 진행한다.
+`.claude/commands/plan-run.md`. `/plan`으로 등록된 태스크를 순차로(동시에 하나씩) 진행한다.
 `/clear` 후 새 세션에서 시작하는 것을 전제로 — 의도(완료조건)와 상태(노트)가 전부 보드에
 있어 이전 대화 없이도 이어갈 수 있다.
 
@@ -260,7 +260,7 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 
 ### `.claude/docs/lessons.md` — 반복 방지 장치
 
-`/retro`가 승격한 교훈이 쌓이는 파일. `/plan`과 `/team-run`이 매 실행 시작 시 읽어 과거
+`/retro`가 승격한 교훈이 쌓이는 파일. `/plan`과 `/plan-run`이 매 실행 시작 시 읽어 과거
 사이클의 실수를 계획·구현 단계에서 미리 차단한다. DB가 아니라 파일인 이유: 사람이 직접
 큐레이션(통합·삭제)하기 쉽고, git diff로 변경 이력이 보이며, 영구 규칙이 되면 CLAUDE.md로
 승격하고 여기서 빼는 흐름이 자연스럽기 때문이다.
@@ -278,7 +278,7 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 
 # 2. /clear로 기획 대화의 잡음을 끊고 새 세션에서 실행
 /clear
-/team-run
+/plan-run
    → Todo 소진까지 태스크를 순차로: 구현 → 자체 QA → 커밋 → 리뷰 → Done
    → [human] 확인이 필요하면 그 자리에서 질문, 아니면 자율 진행
    → N_DONE개 Done마다 세션 지속 여부 확인 (컨텍스트 오염 방지)
@@ -303,56 +303,68 @@ Claude Code에서 `/clear`나 `/compact`를 하면 대화 컨텍스트가 사라
 /resume                         → 자동으로 보드 조회 + 컨텍스트 복원
 
 # 방법 2: 수동 복원
-get_board(team-xxxxxxxx)        → 전체 현황
-get_team_status(team-xxxxxxxx)  → 블로커, 활동 이력
-get_task_detail(task-xxxxxxxx)  → 진행 중이던 작업의 노트 확인 (handoff 노트 우선)
+get_board(project-xxxxxxxx)        → 전체 현황
+get_project_status(project-xxxxxxxx)  → 블로커, 활동 이력
+get_task_detail(task-xxxxxxxx)     → 진행 중이던 작업의 노트 확인 (handoff 노트 우선)
 ```
 
-> **`.claude/docs/kanban.md`에 Team ID / Agent ID를 기록해두면** `/clear` 후에도 커맨드들이
+> **`.claude/docs/kanban.md`에 프로젝트 ID / 에이전트 ID를 기록해두면** `/clear` 후에도 커맨드들이
 > ID를 다시 찾을 필요가 없다.
 
 ---
 
 ## 도구 레퍼런스
 
-### Phase 1: 팀 구성
+총 13개 도구. 커맨드(`/plan`·`/plan-run`)가 내부에서 호출하므로 직접 부를 일은 드물지만,
+수동 복원·디버깅 시 참고한다.
+
+### 1. 프로젝트 준비 (레포당 1회)
 
 ```
-1. create_team("프로젝트명")
-   → { id: "team-xxxxxxxx", name: "프로젝트명" }
+init_project("프로젝트명")
+  → { id: "project-xxxxxxxx", name: "프로젝트명" }
+  # get-or-create(멱등): 같은 이름이 이미 있으면 그 프로젝트를 재사용
 
-2. add_agent(team_id, "이름", "역할")
-   역할: PM | Developer | Reviewer | Tester | Designer
-   → { id: "agent-xxxxxxxx" }
+add_agent(project_id, "이름", "역할")
+  역할: PM | Developer | Reviewer | Tester | Designer
+  → { id: "agent-xxxxxxxx" }
+  # 단일 세션 모델 — 보통 세션 자신을 나타내는 에이전트 1개면 충분하다.
+  # (add_note가 agent_id를 요구하므로 최소 1개는 필요)
 ```
 
-**예시:**
-```
-create_team("Payment Refactoring")          → team-pay01
-add_agent(team-pay01, "Alice", "PM")        → agent-alice
-add_agent(team-pay01, "Bob", "Developer")   → agent-bob
-add_agent(team-pay01, "Charlie", "Reviewer")→ agent-charlie
-```
+프로젝트 ID / 에이전트 ID는 `.claude/docs/kanban.md`에 기록해 `/clear` 후에도 재사용한다.
 
-### Phase 2: 작업 생성
+### 2. 플랜 (의도 단위)
+
+`/plan`이 요구사항 인터뷰 결과를 플랜으로 등록한다. 태스크는 플랜에 매달아 리뷰 체크포인트로 쓴다.
 
 ```
-create_task(team_id, "제목", description?, priority?, assignee_id?)
+create_plan(project_id, "제목", goal?, scope_in?, scope_out?)
+  → { id: "plan-xxxxxxxx", title: "..." }
+  # goal/scope_in/scope_out = 인터뷰로 확정한 "왜와 경계"
+
+list_plans(project_id)   → 플랜 목록 + 각 플랜의 파생 상태(planned/active/completed/blocked)
+get_plan(plan_id)        → 플랜 상세 + 소속 태스크 목록
+```
+
+### 3. 태스크 생성
+
+```
+create_task(project_id, "제목", description?, priority?, assignee_id?, plan_id?, position?)
   priority: Low | Medium | High | Critical (기본: Medium)
+  plan_id/position: 플랜에 소속시키고 플랜 내 순서 지정 (생략 시 plan_id=NULL = 미분류 버킷)
   → { id: "task-xxxxxxxx", status: "Backlog", version: 1 }
 ```
 
 **예시:**
 ```
-create_task(team-pay01, "결제 API 에러 핸들링 개선",
-            priority="High", assignee_id=agent-bob)
+create_task(project-xxxxxxxx, "결제 API 에러 핸들링 개선",
+            priority="High", plan_id=plan-xxxxxxxx, position=1)
 ```
 
-> 생성 시 자동으로 시스템 노트가 추가됨:
-> - "Task created by Bob (Developer): 결제 API 에러 핸들링 개선"
-> - "Assigned to Bob (Developer)"
+> 생성 시 자동으로 시스템 노트(`note_type="system"`)가 추가된다.
 
-### Phase 3: 작업 진행
+### 4. 태스크 진행
 
 #### 상태 변경
 
@@ -367,47 +379,47 @@ Backlog → Todo → InProgress → Review → Done
   └── Todo ─────────└── Rejected ┘
 ```
 
-**예시 (일반적인 작업 흐름):**
+**예시 (한 세션이 순차로 진행):**
 ```
-# 1. 작업 시작
+# 1. 착수
 update_task_status(task-001, "Todo", expected_version=1)
-update_task_status(task-001, "InProgress", expected_version=2, comment="코딩 시작")
+update_task_status(task-001, "InProgress", expected_version=2, comment="구현 시작")
 
-# 2. 진행 중 메모 추가
-add_note(task-001, agent-bob, "PaymentService 리팩토링 50% 완료", note_type="progress")
+# 2. 진행 중 메모
+add_note(task-001, agent-xxxxxxxx, "PaymentService 리팩토링 50% 완료", note_type="progress")
 
-# 3. 리뷰 요청
+# 3. 리뷰 요청 (handoff 노트로 완료조건·변경파일 남김)
 update_task_status(task-001, "Review", expected_version=3)
-assign_task(task-001, agent-charlie, expected_version=4)
-add_note(task-001, agent-bob, "리뷰 부탁드립니다. 변경 파일: ...", note_type="handoff")
+add_note(task-001, agent-xxxxxxxx, "완료조건/변경 파일: ...", note_type="handoff")
 
-# 4. 완료
-update_task_status(task-001, "Done", expected_version=5, agent_id=agent-charlie)
+# 4. 완료 (Reviewer 서브에이전트 판정 후)
+update_task_status(task-001, "Done", expected_version=4)
 ```
 
-#### 블로커 처리
+#### 할당 / 블로커
 
 ```
-# 블로커 설정 (reason 필수)
+# 할당 (에이전트가 해당 태스크의 프로젝트 소속인지 서버가 검증)
+assign_task(task-001, agent-xxxxxxxx, expected_version=2)
+
+# 블로커 설정 (reason 필수) / 해제
 flag_blocker(task-001, is_blocked=true, expected_version=3, reason="외부 API 키 발급 대기")
-
-# 블로커 해제
 flag_blocker(task-001, is_blocked=false, expected_version=4)
 ```
 
-### Phase 4: 현황 조회
+### 5. 현황 조회
 
 ```
 # 보드 전체 조회 (상태별 그룹)
-get_board(team_id)
+get_board(project_id)
 → { counts: {Backlog: 3, Todo: 2, ...}, board: {...}, wip_status: {...} }
 
 # 태스크 상세 (노트 포함)
 get_task_detail(task_id)
 → { title, status, notes: [...], assigned_to: {...} }
 
-# 팀 통계 (에이전트별 워크로드, 블로커)
-get_team_status(team_id, activity_hours=24)
+# 프로젝트 통계 (에이전트별 워크로드, 블로커, 최근 활동)
+get_project_status(project_id, activity_hours=24)
 → { summary: {...}, agents: [...], blockers: [...], recent_activity: [...] }
 ```
 
@@ -415,22 +427,22 @@ get_team_status(team_id, activity_hours=24)
 
 ## 에러 코드
 
-에이전트가 에러를 받았을 때 참고하는 표:
+도구가 에러를 반환했을 때 참고하는 표:
 
 | 코드 | 원인 | 해결 |
 |------|------|------|
-| `VERSION_CONFLICT` | 다른 에이전트가 이미 수정함 (Optimistic Locking) | `get_task_detail`로 최신 version 확인 후 재시도 |
+| `VERSION_CONFLICT` | `expected_version`이 최신과 불일치 (Optimistic Locking) | `get_task_detail`로 최신 version 확인 후 재시도 |
 | `INVALID_TRANSITION` | 허용되지 않는 상태 전이 (예: Backlog → Done) | 상태 전이 규칙 확인. 응답에 `allowed_transitions` 포함 |
 | `WIP_LIMIT_EXCEEDED` | 해당 상태의 진행 중 작업 수가 제한 초과 | 다른 작업을 먼저 완료 (Done/Rejected)하고 재시도 |
-| `CROSS_TEAM_ERROR` | 에이전트가 다른 팀의 태스크에 접근 | 올바른 team_id / agent_id 확인 |
-| `NOT_FOUND` | 팀/에이전트/태스크를 찾을 수 없음 | ID 오타 확인. `get_board`로 유효 ID 조회 |
+| `CROSS_PROJECT_ERROR` | 다른 프로젝트의 에이전트/태스크에 접근 | 올바른 project_id / agent_id 확인 |
+| `NOT_FOUND` | 프로젝트/에이전트/태스크를 찾을 수 없음 | ID 오타 확인. `get_board`로 유효 ID 조회 |
 | `VALIDATION_ERROR` | 필수 파라미터 누락 (예: 블로커 설정 시 reason 미제공) | 에러 메시지에 명시된 필수 값 제공 |
 
 **에러 응답 형식:**
 ```json
 {
   "error": "VERSION_CONFLICT",
-  "message": "다른 에이전트가 이미 수정했습니다. get_task_detail로 최신 상태 조회 후 재시도하세요.",
+  "message": "expected_version이 최신과 다릅니다. get_task_detail로 최신 상태 조회 후 재시도하세요.",
   "current_version": 5,
   "current_status": "Review"
 }
@@ -440,19 +452,21 @@ get_team_status(team_id, activity_hours=24)
 
 ## 데이터 모델
 
-4개 테이블로 구성. 상세 스키마는 [`docs/design/data-model.md`](docs/design/data-model.md) 참조.
+5개 테이블로 구성. 스키마 정의는 `src/agent_kanban/db.py`(SQLite/PostgreSQL 듀얼) 참조.
 
 ```
-Team (1) ──▶ (N) Agent
-Team (1) ──▶ (N) Task ──▶ (N) Note
+Project (1) ──▶ (N) Plan  ──▶ (N) Task ──▶ (N) Note
+Project (1) ──▶ (N) Agent
+Project (1) ──▶ (N) Task           (plan_id=NULL = 미분류 버킷)
 Task ──▶ Agent (assignee)
 ```
 
 | 테이블 | 주요 필드 | 설명 |
 |--------|----------|------|
-| **teams** | id, name, config | 팀. config에 WIP 제한 설정 |
-| **agents** | id, team_id, name, role | 팀 소속 에이전트 (PM/Developer/Reviewer/Tester/Designer) |
-| **tasks** | id, team_id, status, priority, assignee_id, version | 작업 카드. version으로 Optimistic Locking |
+| **projects** | id, name, config | 프로젝트(레포당 1개, 싱글턴). config에 WIP 제한 설정 |
+| **plans** | id, project_id, title, goal, scope_in, scope_out | 의도 단위. 파생 상태(planned/active/completed/blocked) |
+| **agents** | id, project_id, name, role | 프로젝트 소속 에이전트 (PM/Developer/Reviewer/Tester/Designer) |
+| **tasks** | id, project_id, plan_id, status, priority, assignee_id, position, version | 작업 카드. version으로 Optimistic Locking |
 | **notes** | id, task_id, agent_id, content, note_type | 작업 메모 (progress/blocker/handoff/review/system) |
 
 **상태 머신:**
@@ -475,7 +489,7 @@ Todo → Backlog (우선순위 재조정)
 - 칸반 DB에 도달 불가한 환경에서는 '칸반' 탭이 노출되지 않는다 (fail-closed).
 - MCP 서버(`server.py`)의 쓰기·읽기 도구는 그대로 유지된다 — 이 폐기는 뷰잉 서버에만 해당.
 
-읽기 REST API(팀/보드/태스크/팀상태)는 session_board `/api/kanban/*`가 담당한다.
+읽기 REST API(프로젝트/보드/태스크/프로젝트상태)는 session_board `/api/kanban/*`가 담당한다.
 
 ---
 
@@ -486,8 +500,8 @@ Todo → Backlog (우선순위 재조정)
 | URI | 설명 |
 |-----|------|
 | `kanban://rules` | 칸반 규칙 (상태 전이, 에러 처리, WIP 제한) |
-| `kanban://board/{team_id}` | 보드 마크다운 스냅샷 (구독 가능) |
-| `kanban://board/{team_id}/agents` | 에이전트 워크로드 테이블 (구독 가능) |
+| `kanban://board/{project_id}` | 보드 마크다운 스냅샷 (구독 가능) |
+| `kanban://board/{project_id}/agents` | 에이전트 워크로드 테이블 (구독 가능) |
 
 ## MCP Prompts
 
@@ -495,8 +509,8 @@ Todo → Backlog (우선순위 재조정)
 
 | Prompt | 파라미터 | 용도 |
 |--------|---------|------|
-| `kanban_system_prompt` | team_id, agent_id | 에이전트 초기화 (보드 현황 + 내 할당 작업) |
-| `daily_standup_prompt` | team_id | 스탠드업 요약 생성 |
+| `kanban_system_prompt` | project_id, agent_id | 에이전트 초기화 (보드 현황 + 내 할당 작업) |
+| `daily_standup_prompt` | project_id | 스탠드업 요약 생성 |
 | `task_handoff_prompt` | task_id, from_agent_id, to_agent_id | 작업 인계 절차 |
 | `blocker_escalation_prompt` | task_id | 블로커 분석 및 에스컬레이션 |
 | `task_completion_prompt` | task_id, agent_id | 완료 체크리스트 |
@@ -508,7 +522,7 @@ Todo → Backlog (우선순위 재조정)
 ### Optimistic Locking (낙관적 잠금)
 
 모든 태스크에 `version` 필드가 있으며, 수정 시 `expected_version`을 제출해야 한다.
-다른 에이전트가 먼저 수정했으면 `VERSION_CONFLICT` 에러가 반환된다.
+제출한 버전이 최신과 다르면(예: Reviewer 서브에이전트나 다른 PC가 먼저 수정) `VERSION_CONFLICT` 에러가 반환된다.
 
 ```
 적용 대상: update_task_status, assign_task, flag_blocker
@@ -517,7 +531,7 @@ Todo → Backlog (우선순위 재조정)
 
 ### WIP Limits (진행 중 작업 제한)
 
-팀 config에 상태별 최대 작업 수를 설정할 수 있다:
+프로젝트 config에 상태별 최대 작업 수를 설정할 수 있다:
 
 ```json
 { "wip_limits": { "InProgress": 3, "Review": 2 } }
@@ -525,10 +539,10 @@ Todo → Backlog (우선순위 재조정)
 
 제한 초과 시 `WIP_LIMIT_EXCEEDED` 에러 반환.
 
-### Cross-Team Validation (팀 간 접근 제한)
+### Cross-Project Validation (프로젝트 간 접근 제한)
 
-에이전트는 자신이 속한 팀의 태스크만 조작할 수 있다.
-다른 팀의 태스크에 접근하면 `CROSS_TEAM_ERROR` 에러 반환.
+에이전트/태스크는 자신이 속한 프로젝트 범위 안에서만 조작할 수 있다.
+다른 프로젝트의 리소스에 접근하면 `CROSS_PROJECT_ERROR` 에러 반환.
 
 ### Auto System Notes (자동 시스템 노트)
 
@@ -539,4 +553,5 @@ Todo → Backlog (우선순위 재조정)
 
 ## 설계 문서
 
-- [`docs/design/data-model.md`](docs/design/data-model.md) — ER 다이어그램, DB 스키마, 상태 머신
+- [`../SPEC.md`](../SPEC.md) — 데이터 모델·마이그레이션·워크플로우 전체 스펙 (단일 세션 기준)
+- [`docs/design/decisions.md`](docs/design/decisions.md) — 주요 설계 결정 기록 (ADR)
