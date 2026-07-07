@@ -1,21 +1,27 @@
 # AI-Board MCP Server
 
-Claude Agent Teams 협업을 위한 AI-Board MCP 서버.
-에이전트들이 작업 진행 상황을 DB에 기록하고, 대시보드(session_board)에서 시각적으로 확인할 수 있다.
+칸반 보드를 워크플로우 엔진으로 쓰는 AI-Board MCP 서버.
+`/plan`(기획) → `/team-run`(구현·자체QA·리뷰·Done 자율 순환) → `/retro`(회고·교훈 승격) →
+`/resume`(세션 복원) 4개 커맨드가 이 서버 위에서 동작하며, 진행 상황과 판단 근거는
+전부 DB(태스크/노트)에 남아 대시보드(session_board)에서 확인할 수 있다.
+
+이 워크플로우는 **한 세션이 태스크를 순차로 진행**하는 것을 전제로 설계되었다
+(여러 에이전트가 동시에 각자 태스크를 잡는 병렬 실행 단위가 아니다). 유일한 예외는
+리뷰 단계에서 신선한 컨텍스트로 판정하는 Reviewer 서브에이전트다.
 
 ## 아키텍처
 
 ```
 [로컬 모드]
-Claude Agent Teams
+Claude Code (단일 세션)
     │
     └─ [stdio] ──→ MCP Server (server.py) ──→ SQLite DB (kanban.db, 로컬)
                      10 Tools / 3 Resources / 5 Prompts
 
-[클라우드 공유 모드]
-Claude Agent A (PC-1) ──┐
-Claude Agent B (PC-2) ──┼─ [stdio] ──→ MCP Server (각 로컬) ──→ PostgreSQL (GCP VM)
-Claude Agent C (PC-3) ──┘
+[클라우드 공유 모드 — 동일 사용자의 여러 PC 동기화용, 동시 병렬 작업 목적 아님]
+Claude Code (PC-1) ──┐
+Claude Code (PC-2) ──┼─ [stdio] ──→ MCP Server (각 로컬) ──→ PostgreSQL (GCP VM)
+Claude Code (PC-3) ──┘
 ```
 
 - **MCP 서버**: Claude Code가 stdio로 자동 실행. 에이전트가 도구를 호출하여 DB에 기록
@@ -179,140 +185,112 @@ python scripts/migrate_sqlite_to_pg.py            # 실제 이전
 프로젝트 루트(`/path/to/your-project/CLAUDE.md`)에 다음을 추가:
 
 ```markdown
-# 칸반 보드 (필수)
+# 프로젝트명
 
 ## 원칙
-- **칸반 DB가 유일한 진실(Single Source of Truth)**이다.
-- 작업 시작/완료 시 반드시 칸반 상태를 업데이트한다.
-- /clear, /compact 후에도 get_board로 현재 상태를 복원한다.
+- `.claude/docs/kanban.md` 파일이 있는 경우에는 모든 대화 실행 시 반드시 참조할 것
+
+## 금지사항
+- `kanban.db` 및 마이그레이션 스크립트는 명시 요청 없이 수정 금지
+- 완료조건에 없는 모호함은 추론으로 채우지 말고 사용자에게 질문할 것
 
 ## 워크플로우
-1. 작업 시작 전: `get_board`로 현재 보드 확인
-2. 작업 착수: `update_task_status` → InProgress + `add_note`로 계획 기록
-3. 작업 완료: `update_task_status` → Done + `add_note`로 결과 기록
-4. 블로커 발생: `flag_blocker`로 즉시 기록
-
-## 팀 정보
-- Team ID: `team-xxxxxxxx`
-- 내 Agent ID: `agent-xxxxxxxx`
+- 기획: `/plan <요구사항>` — 인터뷰 → 완료조건 포함 태스크 분해 → 승인 → 보드 등록
+- 실행: `/clear` 후 새 세션에서 `/team-run` — 구현 → 자체 QA → 리뷰 → Done 자율 순환
+- 복원: `/resume` — 최신 handoff 노트 기준 컨텍스트 복원
+- 회고: `/retro` — 보드 데이터로 리뷰 실효성·프로세스 마찰·우회 측정
 ```
+
+`.claude/docs/kanban.md`에는 팀 ID·에이전트 ID를 기록해둔다 (아래 "팀 구성" 참조).
+이 파일이 있어야 `/clear` 후에도 커맨드들이 ID를 다시 찾을 필요가 없다.
 
 ### 핵심 포인트
 
 | 항목 | 설명 |
 |------|------|
-| DB = 유일한 진실 | 에이전트가 기억에 의존하지 않고 DB를 조회하도록 강제 |
-| 워크플로우 명시 | 언제 어떤 도구를 호출할지 구체적으로 지시 |
-| Team/Agent ID 기록 | 세션 복원 시 재설정 없이 바로 작업 가능 |
+| kanban.md 강제 참조 | 매 대화마다 팀/에이전트 ID를 다시 묻지 않도록 강제 |
+| 커맨드 4개로 워크플로우 고정 | 기획·실행·복원·회고 각각을 시스템 프롬프트가 아니라 명시적 커맨드로 분리 |
+| 금지사항 명시 | DB 직접 수정, 모호함 추론 등 반복되는 실수를 규칙으로 차단 |
 
 ---
 
-## Slash Commands (권장)
+## Slash Commands (핵심 워크플로우)
 
-`.claude/commands/` 디렉토리에 단축 명령을 추가하면 MCP 호출을 보장할 수 있다.
+`.claude/commands/`에 4개 커맨드가 있으며, 프로젝트 로컬이라 별도 등록 없이 자동 인식된다.
+각 커맨드의 전체 로직은 해당 파일에 있다 — 아래는 역할 요약이다.
 
-### 설정 방법
+### /plan — 기획 (요구사항 → 태스크)
 
-```bash
-mkdir -p .claude/commands
-```
+`.claude/commands/plan.md`. `$ARGUMENTS`로 받은 요구사항을 곧바로 분해하지 않는다:
 
-### /board — 보드 현황 조회
+1. **요구사항 인터뷰** (생략 불가): 범위·제약·검증 방법·추론이 필요한 지점을 확인 — 모호함을
+   추론으로 채우지 않고 `AskUserQuestion`으로 확정받는다
+2. **태스크 분해**: 태스크 = 순차 진행 중 리뷰 체크포인트(커밋 단위). 각 태스크에
+   `[auto]`/`[human]` 태그가 붙은 완료조건을 명시한다
+3. **사용자 승인** (게이트): 분해 결과를 표로 제시하고 승인받기 전에는 `create_task` 호출 금지
+4. **계획 문서 저장 + 보드 등록**: `.claude/docs/plans/plan-YYYYMMDD-<주제>.md`에 "왜와 경계"를
+   저장하고, 승인된 태스크만 `create_task`
 
-`.claude/commands/board.md`:
-```markdown
-get_board로 현재 칸반보드 상태를 조회하고 요약해줘.
-팀 ID: team-xxxxxxxx
+### /team-run — 실행 (구현 → 자체 QA → 리뷰 → Done 자율 순환)
 
-상태별 작업 수, 블로커 여부, 내 할당 작업을 정리해줘.
-```
+`.claude/commands/team-run.md`. `/plan`으로 등록된 태스크를 순차로(동시에 하나씩) 진행한다.
+`/clear` 후 새 세션에서 시작하는 것을 전제로 — 의도(완료조건)와 상태(노트)가 전부 보드에
+있어 이전 대화 없이도 이어갈 수 있다.
+
+- 태스크별: 착수 → 구현 → 자체 QA(`[auto]` 조건을 실제로 실행해 검증) → handoff 노트 →
+  커밋 → Reviewer 서브에이전트(신선한 컨텍스트로 diff만 보고 재검증) → 판정
+- FAIL 시 Rejected → 수정 → 재검증을 자동 순환하되 `MAX_QA_LOOP`/`MAX_REVIEW_FAIL` 회수를
+  넘으면 강제 정지(서킷브레이커)하고 사용자에게 보고
+- `[human]` 조건은 사람만 확인 가능 — Review 상태로 대기시키고 `AskUserQuestion`으로 확인받은
+  뒤에만 Done 처리 (자율 판정 금지)
+- 사람 개입은 이 [human] 확인, 블로커, 반복 반려 시로 한정된다
+
+### /retro — 회고 (데이터 기반 튜닝 + 교훈 승격)
+
+`.claude/commands/retro.md`. 완료된 계획의 보드 데이터(+git log)로 리뷰 실효성(러버스탬프
+비율), 프로세스 마찰(QA 루프·블로커·[human] 대기 빈도), 우회(보드 밖 커밋)를 측정해
+`.claude/docs/retros/retro-YYYYMMDD.md`로 저장한다. handoff 노트의 서사 필드(문제와 해결/
+버린 접근)에서 재발 방지 교훈을 추려 사용자 승인 후 `.claude/docs/lessons.md`에 한 줄
+지시형으로 승격한다 (상한 20줄, 큐레이션 필수).
 
 ### /resume — 세션 복원
 
-`.claude/commands/resume.md`:
-```markdown
-칸반보드에서 내 현재 상태를 복원해줘.
+`.claude/commands/resume.md`. `get_board`로 InProgress 태스크를 찾고 **최신 handoff 노트를
+최우선으로** 읽어 완료조건/완료한 것/남은 것/주의사항을 요약한다.
 
-1. get_board(team-xxxxxxxx)로 보드 전체 조회
-2. get_team_status(team-xxxxxxxx)로 팀 현황 확인
-3. 내 에이전트(agent-xxxxxxxx)에 할당된 InProgress 작업 파악
-4. 해당 작업의 get_task_detail로 최근 노트 확인
-5. 이전 작업 컨텍스트를 요약해줘
-```
+### `.claude/docs/lessons.md` — 반복 방지 장치
 
-### /done — 작업 완료 처리
-
-`.claude/commands/done.md`:
-```markdown
-현재 진행 중인 작업을 완료 처리해줘.
-
-1. get_board(team-xxxxxxxx)에서 내(agent-xxxxxxxx) InProgress 작업 확인
-2. 해당 작업에 add_note로 완료 내용 기록
-3. update_task_status로 Review 또는 Done으로 변경
-4. 다음 할당 작업이 있으면 알려줘
-```
-
-### /plan — 작업 분해 및 생성
-
-`.claude/commands/plan.md`:
-```markdown
-$ARGUMENTS 작업을 분석하고 칸반 태스크로 분해해줘.
-
-1. 요구사항 분석
-2. 하위 작업으로 분해 (각각 create_task)
-3. 우선순위 설정 (Critical > High > Medium > Low)
-4. 담당자 할당 (assign_task)
-5. 보드 현황 요약
-```
+`/retro`가 승격한 교훈이 쌓이는 파일. `/plan`과 `/team-run`이 매 실행 시작 시 읽어 과거
+사이클의 실수를 계획·구현 단계에서 미리 차단한다. DB가 아니라 파일인 이유: 사람이 직접
+큐레이션(통합·삭제)하기 쉽고, git diff로 변경 이력이 보이며, 영구 규칙이 되면 CLAUDE.md로
+승격하고 여기서 빼는 흐름이 자연스럽기 때문이다.
 
 ---
 
 ## 사용 시나리오
 
-### 단일 세션 (일상 작업)
-
-혼자 작업할 때의 전형적인 흐름:
+### 일상 작업 흐름
 
 ```
-# 1. 보드 확인
-/board                          → 현재 상태 파악
+# 1. 새 요구사항 기획 (사람과 함께, 인터뷰 후 승인 게이트)
+/plan "결제 API 에러 핸들링 개선"
+   → 인터뷰 → 태스크 분해 표 제시 → 승인 → 계획 문서 저장 + 보드 등록
 
-# 2. 작업 선택 및 시작
-update_task_status(task-001, "InProgress", version=2)
-add_note(task-001, agent-me, "API 엔드포인트 구현 시작")
+# 2. /clear로 기획 대화의 잡음을 끊고 새 세션에서 실행
+/clear
+/team-run
+   → Todo 소진까지 태스크를 순차로: 구현 → 자체 QA → 커밋 → 리뷰 → Done
+   → [human] 확인이 필요하면 그 자리에서 질문, 아니면 자율 진행
+   → N_DONE개 Done마다 세션 지속 여부 확인 (컨텍스트 오염 방지)
 
-# 3. 작업 수행 (일반 코딩)
-... 코드 작성 ...
+# 3. 세션이 끊겼다면 (수동 /clear, 자동 정지, 다음 날 재개 등)
+/resume
+   → 최신 handoff 노트 기준으로 어디까지 했는지 복원
 
-# 4. 진행 기록
-add_note(task-001, agent-me, "POST /api/users 구현 완료, 테스트 작성 중")
-
-# 5. 완료
-/done                           → 자동으로 상태 변경 + 노트 기록
-```
-
-### Agent Teams (병렬 작업)
-
-Claude Code의 Agent Teams 기능으로 여러 에이전트가 병렬 작업할 때:
-
-```
-# Team Lead가 팀 구성
-create_team("Feature-Auth")
-add_agent(team-auth, "lead", "PM")
-add_agent(team-auth, "backend", "Developer")
-add_agent(team-auth, "frontend", "Developer")
-add_agent(team-auth, "reviewer", "Reviewer")
-
-# 작업 생성 및 할당
-create_task(team-auth, "JWT 인증 구현", priority="High", assignee_id=agent-backend)
-create_task(team-auth, "로그인 UI 구현", priority="High", assignee_id=agent-frontend)
-
-# 각 에이전트는 자기 작업만 진행
-# backend: update_task_status → InProgress → Review
-# frontend: update_task_status → InProgress → Review
-# reviewer: get_board로 Review 상태 작업 확인 → 리뷰 후 Done
-
-# Optimistic Locking이 동시 수정 충돌을 방지
+# 4. 계획 완료 후 회고
+/retro
+   → 리뷰가 실제로 잡은 결함, 자주 깨진 규칙, 튜닝 제안을 보고
+   → 승인 시 lessons.md에 교훈 승격 + 보드에 [retro]/[lessons] 다이제스트 게시
 ```
 
 ### 세션 복원 (/clear, /compact 후)
@@ -327,10 +305,11 @@ Claude Code에서 `/clear`나 `/compact`를 하면 대화 컨텍스트가 사라
 # 방법 2: 수동 복원
 get_board(team-xxxxxxxx)        → 전체 현황
 get_team_status(team-xxxxxxxx)  → 블로커, 활동 이력
-get_task_detail(task-xxxxxxxx)  → 진행 중이던 작업의 노트 확인
+get_task_detail(task-xxxxxxxx)  → 진행 중이던 작업의 노트 확인 (handoff 노트 우선)
 ```
 
-> **CLAUDE.md에 Team ID / Agent ID를 기록해두면** `/clear` 후에도 ID를 다시 찾을 필요가 없다.
+> **`.claude/docs/kanban.md`에 Team ID / Agent ID를 기록해두면** `/clear` 후에도 커맨드들이
+> ID를 다시 찾을 필요가 없다.
 
 ---
 
