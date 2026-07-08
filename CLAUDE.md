@@ -8,9 +8,13 @@
 - 대시보드(칸반 뷰잉): session_board(Claude Session Dashboard)로 이전됨 — 해당 레포에서 `npm run build`로 검증
 
 ## 플러그인 배포 (커밋 후 필수)
-이 레포는 Claude Code 플러그인(`ai-board`)으로 배포된다. 서버·커맨드·스키마 변경 시 아래를 반드시 수행:
-1. `.claude-plugin/plugin.json`의 `version`을 semver로 범프
-2. 플러그인 재설치: `claude mcp remove agent-kanban && claude plugin install ai-board`
+이 레포는 Claude Code 플러그인(`ai-board`)으로 배포된다. 서버·커맨드·스키마 변경 커밋 후 아래를 반드시 수행:
+1. `.claude-plugin/plugin.json`의 `version`을 semver로 범프 (커밋에 포함)
+2. 플러그인 재설치:
+   ```
+   /plugin uninstall ai-board@ai-board
+   /plugin install ai-board@ai-board
+   ```
 3. 세션 재시작 (MCP 서버는 세션 시작 시에만 로드됨)
 4. 도구 확인: ToolSearch로 `mcp__plugin_ai-board_agent-kanban__*` 도구가 정상 로드되는지 검증
 
