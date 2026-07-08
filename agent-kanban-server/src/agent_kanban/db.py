@@ -195,6 +195,8 @@ def init_db(conn) -> None:
     # 레거시(teams/team_id) → projects/project_id rename. CREATE 전에 실행해야
     # 빈 projects 테이블이 먼저 생기는 것을 막는다.
     _migrate_legacy_team_to_project(conn)
+    # 레거시 agents 테이블이 남아있으면 FK 충돌 발생 — 스키마 생성 전에 제거
+    _drop_legacy_agents(conn)
     if _is_pg(conn):
         for stmt in PG_SCHEMA:
             _exec(conn, stmt)
@@ -233,6 +235,72 @@ def _migrate_legacy_team_to_project(conn) -> None:
     for idx in ("idx_tasks_team_id", "idx_tasks_team_status",
                 "idx_plans_team_id"):
         _exec(conn, f"DROP INDEX IF EXISTS {idx}")
+    conn.commit()
+
+
+def _drop_legacy_agents(conn) -> None:
+    """레거시 agents 테이블 및 관련 FK 컬럼을 스키마 생성 전에 제거 (멱등).
+
+    새 SQLITE_SCHEMA에 agents가 없으므로, 기존 tasks.assignee_id → agents(id) FK가
+    남아있으면 foreign_keys=ON 상태에서 충돌한다. init_db의 executescript 전에 실행.
+    """
+    if not _table_exists(conn, "agents"):
+        return
+
+    # tasks의 assignee_id FK가 agents를 참조하므로, agents DROP 전에 tasks를 먼저 재생성
+    if _column_exists(conn, "tasks", "assignee_id"):
+        if _is_pg(conn):
+            _exec(conn, "ALTER TABLE tasks DROP COLUMN assignee_id")
+        else:
+            # 현재 tasks에 plan_id/position이 있을 수도 없을 수도 있음
+            has_plan_id = _column_exists(conn, "tasks", "plan_id")
+            plan_cols = ", plan_id TEXT, position INTEGER" if has_plan_id else ""
+            plan_select = ", plan_id, position" if has_plan_id else ""
+
+            _exec(conn, f"""CREATE TABLE tasks_new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                title TEXT NOT NULL, description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Backlog'
+                    CHECK(status IN ('Backlog','Todo','InProgress','Review','Done','Rejected')),
+                priority TEXT NOT NULL DEFAULT 'Medium'
+                    CHECK(priority IN ('Low','Medium','High','Critical')),
+                is_blocked INTEGER NOT NULL DEFAULT 0, blocker_reason TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')){plan_cols}
+            )""")
+            _exec(conn, f"""INSERT INTO tasks_new
+                SELECT id, project_id, title, description, status, priority,
+                       is_blocked, blocker_reason, version, created_at, updated_at{plan_select}
+                FROM tasks""")
+            _exec(conn, "DROP TABLE tasks")
+            _exec(conn, "ALTER TABLE tasks_new RENAME TO tasks")
+
+    # agents 테이블 제거 (tasks FK 해소 후)
+    _exec(conn, "DROP TABLE IF EXISTS agents")
+    _exec(conn, "DROP INDEX IF EXISTS idx_agents_project_id")
+    _exec(conn, "DROP INDEX IF EXISTS idx_tasks_assignee_id")
+
+    # notes: agent_id 컬럼 제거
+    if _column_exists(conn, "notes", "agent_id"):
+        if _is_pg(conn):
+            _exec(conn, "ALTER TABLE notes DROP COLUMN agent_id")
+        else:
+            _exec(conn, """CREATE TABLE notes_new (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                note_type TEXT NOT NULL DEFAULT 'progress'
+                    CHECK(note_type IN ('progress','blocker','handoff','review','system')),
+                created_at TEXT DEFAULT (datetime('now'))
+            )""")
+            _exec(conn, """INSERT INTO notes_new
+                SELECT id, task_id, content, note_type, created_at
+                FROM notes""")
+            _exec(conn, "DROP TABLE notes")
+            _exec(conn, "ALTER TABLE notes_new RENAME TO notes")
+
     conn.commit()
 
 
