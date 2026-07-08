@@ -13,7 +13,3 @@
 
 ## 프로젝트 정보 (AI-Board 통합 — session_board)
 - 프로젝트 ID : `team-Aa3xGjTv`
-- PM : `agent-n5-kkYE3`
-- Developer - 백엔드: `agent-3IbUgNSR`
-- Developer - 프론트: `agent-FlGRpS0M`
-- Reviewer: `agent-1cszQVGu`
