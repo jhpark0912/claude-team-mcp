@@ -10,13 +10,12 @@
 ## 플러그인 배포 (커밋 후 필수)
 이 레포는 Claude Code 플러그인(`ai-board`)으로 배포된다. 서버·커맨드·스키마 변경 커밋 후 아래를 반드시 수행:
 1. `.claude-plugin/plugin.json`의 `version`을 semver로 범프 (커밋에 포함)
-2. 플러그인 재설치:
-   ```
-   /plugin uninstall ai-board@ai-board
-   /plugin install ai-board@ai-board
-   ```
-3. 세션 재시작 (MCP 서버는 세션 시작 시에만 로드됨)
-4. 도구 확인: ToolSearch로 `mcp__plugin_ai-board_agent-kanban__*` 도구가 정상 로드되는지 검증
+2. 플러그인 업데이트: `/plugin` → 목록에서 ai-board 선택 → Update
+3. `/reload-plugins`로 반영 후 세션 재시작 (MCP 서버는 세션 시작 시에만 로드됨)
+4. 도구 확인: ToolSearch로 아래 11개 도구가 정상 로드되는지 검증
+   - `init_project`, `create_plan`, `get_plan`, `list_plans`
+   - `create_task`, `update_task_status`, `add_note`, `flag_blocker`
+   - `get_board`, `get_task_detail`, `get_project_status`
 
 ## 금지사항
 - `kanban.db` 및 마이그레이션 스크립트는 명시 요청 없이 수정 금지
