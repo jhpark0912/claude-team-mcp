@@ -19,8 +19,9 @@ from nanoid import generate as nanoid
 
 from .models import (
     ALL_STATUSES,
-    CrossProjectError,
+    NoteType,
     NotFoundError,
+    Priority,
     ValidationError,
     VersionConflictError,
     WipLimitExceededError,
@@ -57,15 +58,6 @@ CREATE TABLE IF NOT EXISTS projects (
     config      TEXT DEFAULT '{}'
 );
 
-CREATE TABLE IF NOT EXISTS agents (
-    id          TEXT PRIMARY KEY,
-    project_id     TEXT NOT NULL REFERENCES projects(id),
-    name        TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'Developer'
-                CHECK(role IN ('PM','Developer','Reviewer','Tester','Designer')),
-    created_at  TEXT DEFAULT (datetime('now'))
-);
-
 CREATE TABLE IF NOT EXISTS tasks (
     id          TEXT PRIMARY KEY,
     project_id     TEXT NOT NULL REFERENCES projects(id),
@@ -75,7 +67,6 @@ CREATE TABLE IF NOT EXISTS tasks (
                 CHECK(status IN ('Backlog','Todo','InProgress','Review','Done','Rejected')),
     priority    TEXT NOT NULL DEFAULT 'Medium'
                 CHECK(priority IN ('Low','Medium','High','Critical')),
-    assignee_id TEXT REFERENCES agents(id),
     is_blocked  INTEGER NOT NULL DEFAULT 0,
     blocker_reason TEXT,
     version     INTEGER NOT NULL DEFAULT 1,
@@ -86,7 +77,6 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS notes (
     id          TEXT PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    agent_id    TEXT NOT NULL,
     content     TEXT NOT NULL,
     note_type   TEXT NOT NULL DEFAULT 'progress'
                 CHECK(note_type IN ('progress','blocker','handoff','review','system')),
@@ -94,10 +84,8 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_notes_task_type_created ON notes(task_id, note_type, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_agents_project_id ON agents(project_id);
 """
 
 PG_SCHEMA = (
@@ -106,14 +94,6 @@ PG_SCHEMA = (
     name        TEXT NOT NULL,
     created_at  TIMESTAMP DEFAULT NOW(),
     config      TEXT DEFAULT '{}'
-)""",
-    """CREATE TABLE IF NOT EXISTS agents (
-    id          TEXT PRIMARY KEY,
-    project_id     TEXT NOT NULL REFERENCES projects(id),
-    name        TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'Developer'
-                CHECK(role IN ('PM','Developer','Reviewer','Tester','Designer')),
-    created_at  TIMESTAMP DEFAULT NOW()
 )""",
     """CREATE TABLE IF NOT EXISTS tasks (
     id          TEXT PRIMARY KEY,
@@ -124,7 +104,6 @@ PG_SCHEMA = (
                 CHECK(status IN ('Backlog','Todo','InProgress','Review','Done','Rejected')),
     priority    TEXT NOT NULL DEFAULT 'Medium'
                 CHECK(priority IN ('Low','Medium','High','Critical')),
-    assignee_id TEXT REFERENCES agents(id),
     is_blocked  BOOLEAN NOT NULL DEFAULT FALSE,
     blocker_reason TEXT,
     version     INTEGER NOT NULL DEFAULT 1,
@@ -134,17 +113,14 @@ PG_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS notes (
     id          TEXT PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    agent_id    TEXT NOT NULL,
     content     TEXT NOT NULL,
     note_type   TEXT NOT NULL DEFAULT 'progress'
                 CHECK(note_type IN ('progress','blocker','handoff','review','system')),
     created_at  TIMESTAMP DEFAULT NOW()
 )""",
     "CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_notes_task_type_created ON notes(task_id, note_type, created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_agents_project_id ON agents(project_id)",
 )
 
 
@@ -249,15 +225,13 @@ def _migrate_legacy_team_to_project(conn) -> None:
         return
 
     _exec(conn, "ALTER TABLE teams RENAME TO projects")
-    if _column_exists(conn, "agents", "team_id"):
-        _exec(conn, "ALTER TABLE agents RENAME COLUMN team_id TO project_id")
     if _column_exists(conn, "tasks", "team_id"):
         _exec(conn, "ALTER TABLE tasks RENAME COLUMN team_id TO project_id")
     if _table_exists(conn, "plans") and _column_exists(conn, "plans", "team_id"):
         _exec(conn, "ALTER TABLE plans RENAME COLUMN team_id TO project_id")
 
     for idx in ("idx_tasks_team_id", "idx_tasks_team_status",
-                "idx_agents_team_id", "idx_plans_team_id"):
+                "idx_plans_team_id"):
         _exec(conn, f"DROP INDEX IF EXISTS {idx}")
     conn.commit()
 
@@ -356,10 +330,71 @@ def _mig_add_position(conn) -> None:
     _exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_plan_position ON tasks(plan_id, position)")
 
 
+def _mig_drop_agents(conn) -> None:
+    """agents 테이블 및 관련 컬럼(tasks.assignee_id, notes.agent_id) 제거.
+
+    단일 세션 모델에서 agents 개념이 불필요하므로 삭제한다.
+    SQLite는 DROP COLUMN을 3.35.0+ 에서 지원하지만, 안전하게 재생성한다.
+    """
+    _exec(conn, "DROP TABLE IF EXISTS agents")
+    _exec(conn, "DROP INDEX IF EXISTS idx_agents_project_id")
+    _exec(conn, "DROP INDEX IF EXISTS idx_tasks_assignee_id")
+
+    # tasks: assignee_id 컬럼 제거 (SQLite 재생성)
+    if _column_exists(conn, "tasks", "assignee_id"):
+        if _is_pg(conn):
+            _exec(conn, "ALTER TABLE tasks DROP COLUMN assignee_id")
+        else:
+            _exec(conn, """CREATE TABLE tasks_new (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                title TEXT NOT NULL, description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Backlog'
+                    CHECK(status IN ('Backlog','Todo','InProgress','Review','Done','Rejected')),
+                priority TEXT NOT NULL DEFAULT 'Medium'
+                    CHECK(priority IN ('Low','Medium','High','Critical')),
+                is_blocked INTEGER NOT NULL DEFAULT 0, blocker_reason TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                plan_id TEXT REFERENCES plans(id), position INTEGER
+            )""")
+            _exec(conn, """INSERT INTO tasks_new
+                SELECT id, project_id, title, description, status, priority,
+                       is_blocked, blocker_reason, version, created_at, updated_at,
+                       plan_id, position
+                FROM tasks""")
+            _exec(conn, "DROP TABLE tasks")
+            _exec(conn, "ALTER TABLE tasks_new RENAME TO tasks")
+            _exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id)")
+            _exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status)")
+            _exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_plan_id ON tasks(plan_id)")
+            _exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_plan_position ON tasks(plan_id, position)")
+
+    # notes: agent_id 컬럼 제거
+    if _column_exists(conn, "notes", "agent_id"):
+        if _is_pg(conn):
+            _exec(conn, "ALTER TABLE notes DROP COLUMN agent_id")
+        else:
+            _exec(conn, """CREATE TABLE notes_new (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                note_type TEXT NOT NULL DEFAULT 'progress'
+                    CHECK(note_type IN ('progress','blocker','handoff','review','system')),
+                created_at TEXT DEFAULT (datetime('now'))
+            )""")
+            _exec(conn, """INSERT INTO notes_new
+                SELECT id, task_id, content, note_type, created_at
+                FROM notes""")
+            _exec(conn, "DROP TABLE notes")
+            _exec(conn, "ALTER TABLE notes_new RENAME TO notes")
+            _exec(conn, "CREATE INDEX IF NOT EXISTS idx_notes_task_type_created ON notes(task_id, note_type, created_at DESC)")
+
+
 _MIGRATIONS = [
     (1, "create_plans", _mig_create_plans),
     (2, "tasks_add_plan_id", _mig_add_plan_id),
     (3, "tasks_add_position", _mig_add_position),
+    (4, "drop_agents", _mig_drop_agents),
 ]
 
 
@@ -392,34 +427,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# ── Helper: agent info ────────────────────────────────────────────────────
-
-def _get_agent_display(conn, agent_id: str) -> str:
-    row = _exec(conn, "SELECT name, role FROM agents WHERE id=%s", (agent_id,)).fetchone()
-    if row is None:
-        return agent_id
-    return f"{row['name']} ({row['role']})"
-
-
-def _verify_agent_in_project(conn, agent_id: str, project_id: str) -> None:
-    row = _exec(
-        conn, "SELECT id FROM agents WHERE id=%s AND project_id=%s", (agent_id, project_id)
-    ).fetchone()
-    if row is None:
-        raise CrossProjectError(agent_id, project_id)
-
-
 # ── Notes ─────────────────────────────────────────────────────────────────
 
-def _insert_note(conn, task_id: str, agent_id: str, content: str, note_type: str = "system") -> dict[str, Any]:
+def _insert_note(conn, task_id: str, content: str, note_type: str = NoteType.SYSTEM) -> dict[str, Any]:
     note_id = _gen_id("note")
     now = _now()
     _exec(
         conn,
-        "INSERT INTO notes (id, task_id, agent_id, content, note_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
-        (note_id, task_id, agent_id, content, note_type, now),
+        "INSERT INTO notes (id, task_id, content, note_type, created_at) VALUES (%s,%s,%s,%s,%s)",
+        (note_id, task_id, content, note_type, now),
     )
-    return {"id": note_id, "task_id": task_id, "agent_id": agent_id,
+    return {"id": note_id, "task_id": task_id,
             "content": content, "note_type": note_type, "created_at": now}
 
 
@@ -453,26 +471,6 @@ def get_project(conn, project_id: str) -> dict[str, Any]:
     return _row_to_dict(row)
 
 
-# ── Agents ────────────────────────────────────────────────────────────────
-
-def add_agent(conn, project_id: str, name: str, role: str) -> dict[str, Any]:
-    get_project(conn, project_id)
-    agent_id = _gen_id("agent")
-    now = _now()
-    _exec(conn, "INSERT INTO agents (id, project_id, name, role, created_at) VALUES (%s,%s,%s,%s,%s)",
-          (agent_id, project_id, name, role, now))
-    conn.commit()
-    return {"id": agent_id, "project_id": project_id, "name": name, "role": role,
-            "created_at": now, "message": f"에이전트 '{name} ({role})'이 프로젝트에 추가되었습니다."}
-
-
-def get_agent(conn, agent_id: str) -> dict[str, Any]:
-    row = _exec(conn, "SELECT * FROM agents WHERE id=%s", (agent_id,)).fetchone()
-    if row is None:
-        raise NotFoundError("에이전트", agent_id)
-    return _row_to_dict(row)
-
-
 # ── Tasks ─────────────────────────────────────────────────────────────────
 
 def create_task(
@@ -480,9 +478,7 @@ def create_task(
     project_id: str,
     title: str,
     description: str = "",
-    priority: str = "Medium",
-    assignee_id: str | None = None,
-    creator_agent_id: str | None = None,
+    priority: str = Priority.MEDIUM,
     plan_id: str | None = None,
     position: int | None = None,
 ) -> dict[str, Any]:
@@ -490,39 +486,22 @@ def create_task(
     task_id = _gen_id("task")
     now = _now()
 
-    if assignee_id:
-        _verify_agent_in_project(conn, assignee_id, project_id)
-
     is_blocked_val = False if _is_pg(conn) else 0
     _exec(
         conn,
         """INSERT INTO tasks (id, project_id, title, description, status, priority,
-           assignee_id, is_blocked, blocker_reason, version, created_at, updated_at,
+           is_blocked, blocker_reason, version, created_at, updated_at,
            plan_id, position)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL,1,%s,%s,%s,%s)""",
-        (task_id, project_id, title, description, "Backlog", priority, assignee_id,
+           VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,1,%s,%s,%s,%s)""",
+        (task_id, project_id, title, description, "Backlog", priority,
          is_blocked_val, now, now, plan_id, position),
     )
 
-    creator_display = "system"
-    if creator_agent_id:
-        creator_display = _get_agent_display(conn, creator_agent_id)
-    elif assignee_id:
-        creator_display = _get_agent_display(conn, assignee_id)
-
-    _insert_note(conn, task_id, creator_agent_id or assignee_id or "system",
-                 f"Task created by {creator_display}: {title}", "system")
-
-    if assignee_id:
-        assignee_display = _get_agent_display(conn, assignee_id)
-        _insert_note(conn, task_id, assignee_id or "system",
-                     f"Assigned to {assignee_display}", "system")
-
+    _insert_note(conn, task_id, f"Task created: {title}", "system")
     conn.commit()
 
-    assigned_to = _get_agent_display(conn, assignee_id) if assignee_id else None
     return {"id": task_id, "title": title, "status": "Backlog", "priority": priority,
-            "version": 1, "assigned_to": assigned_to, "created_at": now,
+            "version": 1, "created_at": now,
             "plan_id": plan_id, "position": position,
             "message": f"작업 '{title}'이 Backlog에 추가되었습니다."}
 
@@ -539,7 +518,6 @@ def update_task_status(
     task_id: str,
     new_status: str,
     expected_version: int,
-    agent_id: str | None = None,
     comment: str | None = None,
 ) -> dict[str, Any]:
     task = get_task(conn, task_id)
@@ -567,45 +545,21 @@ def update_task_status(
         current = get_task(conn, task_id)
         raise VersionConflictError(current["version"], current["status"])
 
-    agent_display = _get_agent_display(conn, agent_id) if agent_id else "system"
-    _insert_note(conn, task_id, agent_id or "system",
-                 f"Status changed: {task['status']} → {new_status} by {agent_display}", "system")
+    _insert_note(conn, task_id,
+                 f"Status changed: {task['status']} → {new_status}", "system")
 
-    if comment and agent_id:
-        _insert_note(conn, task_id, agent_id, comment, "progress")
+    if comment:
+        _insert_note(conn, task_id, comment, "progress")
 
-    _update_plan_timestamps(conn, task_id, new_status)
+    _update_plan_timestamps(conn, task.get("plan_id"), new_status)
 
     conn.commit()
     updated = get_task(conn, task_id)
     return {"task_id": task_id, "title": task["title"],
             "previous_status": task["status"], "new_status": new_status,
             "version": updated["version"], "updated_at": now,
+            "project_id": task["project_id"],
             "message": f"상태가 '{task['status']}' → '{new_status}'로 변경되었습니다."}
-
-
-def assign_task(conn, task_id: str, assignee_id: str, expected_version: int) -> dict[str, Any]:
-    task = get_task(conn, task_id)
-    _verify_agent_in_project(conn, assignee_id, task["project_id"])
-
-    now = _now()
-    cur = _exec(
-        conn,
-        "UPDATE tasks SET assignee_id=%s, version=version+1, updated_at=%s WHERE id=%s AND version=%s",
-        (assignee_id, now, task_id, expected_version),
-    )
-    if cur.rowcount == 0:
-        current = get_task(conn, task_id)
-        raise VersionConflictError(current["version"], current["status"])
-
-    assignee_display = _get_agent_display(conn, assignee_id)
-    _insert_note(conn, task_id, assignee_id, f"Assigned to {assignee_display}", "system")
-    conn.commit()
-
-    updated = get_task(conn, task_id)
-    return {"task_id": task_id, "title": task["title"],
-            "assigned_to": assignee_display, "version": updated["version"],
-            "message": f"작업이 '{assignee_display}'에게 할당되었습니다."}
 
 
 # ── Plans (Phase 1) ───────────────────────────────────────────────────────
@@ -662,13 +616,11 @@ def _plan_task_stats(conn, plan_id: str) -> tuple[dict[str, int], int]:
     return counts, blocked
 
 
-def _update_plan_timestamps(conn, task_id: str, new_status: str) -> None:
+def _update_plan_timestamps(conn, plan_id: str | None, new_status: str) -> None:
     """태스크 상태 변경 시 플랜의 started_at/completed_at를 자동 갱신.
 
     상태(파생)는 저장하지 않지만 타임스탬프는 전이 시점을 알아야 하므로 여기서 기록한다.
     """
-    row = _exec(conn, "SELECT plan_id FROM tasks WHERE id=%s", (task_id,)).fetchone()
-    plan_id = dict(row).get("plan_id") if row else None
     if not plan_id:
         return
 
@@ -769,18 +721,17 @@ def list_plans(conn, project_id: str) -> dict[str, Any]:
 
 # ── Notes (public) ────────────────────────────────────────────────────────
 
-def add_note(conn, task_id: str, agent_id: str, content: str, note_type: str = "progress") -> dict[str, Any]:
+def add_note(conn, task_id: str, content: str, note_type: str = NoteType.PROGRESS) -> dict[str, Any]:
     task = get_task(conn, task_id)
-    _verify_agent_in_project(conn, agent_id, task["project_id"])
 
-    note = _insert_note(conn, task_id, agent_id, content, note_type)
+    note = _insert_note(conn, task_id, content, note_type)
     conn.commit()
 
     total = _exec(conn, "SELECT COUNT(*) as cnt FROM notes WHERE task_id=%s", (task_id,)).fetchone()["cnt"]
-    agent_display = _get_agent_display(conn, agent_id)
     return {
         "task_id": task_id,
-        "note": {"id": note["id"], "agent": agent_display, "content": content,
+        "project_id": task["project_id"],
+        "note": {"id": note["id"], "content": content,
                  "note_type": note_type, "created_at": note["created_at"]},
         "total_notes": total,
         "message": f"메모가 추가되었습니다. (총 {total}개)",
@@ -809,16 +760,17 @@ def flag_blocker(conn, task_id: str, is_blocked: bool, expected_version: int, re
         raise VersionConflictError(current["version"], current["status"])
 
     if is_blocked:
-        _insert_note(conn, task_id, "system", f"Blocker set: {reason}", "system")
-        _insert_note(conn, task_id, "system", reason, "blocker")
+        _insert_note(conn, task_id, f"Blocker set: {reason}", "system")
+        _insert_note(conn, task_id, reason, "blocker")
     else:
-        _insert_note(conn, task_id, "system", "Blocker resolved", "system")
+        _insert_note(conn, task_id, "Blocker resolved", "system")
 
     conn.commit()
     updated = get_task(conn, task_id)
     msg = f"블로커가 설정되었습니다: '{reason}'" if is_blocked else "블로커가 해제되었습니다."
     return {"task_id": task_id, "title": task["title"], "is_blocked": is_blocked,
-            "blocker_reason": blocker_reason, "version": updated["version"], "message": msg}
+            "blocker_reason": blocker_reason, "version": updated["version"],
+            "project_id": task["project_id"], "message": msg}
 
 
 # ── Board Queries ─────────────────────────────────────────────────────────
@@ -830,14 +782,15 @@ def get_board(conn, project_id: str) -> dict[str, Any]:
 
     sql = """
         SELECT t.id, t.title, t.status, t.priority, t.is_blocked, t.version,
-               a.name AS agent_name, a.role AS agent_role,
                (SELECT n.content FROM notes n
                 WHERE n.task_id = t.id AND n.note_type != 'system'
                 ORDER BY n.created_at DESC LIMIT 1) AS latest_note
         FROM tasks t
-        LEFT JOIN agents a ON t.assignee_id = a.id
         WHERE t.project_id = %s
-        ORDER BY t.priority DESC, t.created_at ASC
+        ORDER BY CASE t.priority
+            WHEN 'Critical' THEN 0 WHEN 'High' THEN 1
+            WHEN 'Medium' THEN 2 WHEN 'Low' THEN 3 END,
+            t.created_at ASC
     """
     rows = _exec(conn, sql, (project_id,)).fetchall()
 
@@ -846,10 +799,9 @@ def get_board(conn, project_id: str) -> dict[str, Any]:
         status = r["status"]
         counts[status] = counts.get(status, 0) + 1
 
-        assigned_to = f"{r['agent_name']} ({r['agent_role']})" if r["agent_name"] else None
         entry: dict[str, Any] = {
             "id": r["id"], "title": r["title"], "priority": r["priority"],
-            "assigned_to": assigned_to, "is_blocked": bool(r["is_blocked"]),
+            "is_blocked": bool(r["is_blocked"]),
             "version": r["version"],
         }
         if r["latest_note"]:
@@ -865,13 +817,10 @@ def get_board(conn, project_id: str) -> dict[str, Any]:
 
 
 def get_task_detail(conn, task_id: str) -> dict[str, Any]:
-    # task + project + assignee를 JOIN 1회로 조회
     detail_sql = """
-        SELECT t.*, tm.id AS project_pk, tm.name AS project_name,
-               a.id AS agent_pk, a.name AS agent_name, a.role AS agent_role
+        SELECT t.*, p.id AS project_pk, p.name AS project_name
         FROM tasks t
-        JOIN projects tm ON t.project_id = tm.id
-        LEFT JOIN agents a ON t.assignee_id = a.id
+        JOIN projects p ON t.project_id = p.id
         WHERE t.id = %s
     """
     row = _exec(conn, detail_sql, (task_id,)).fetchone()
@@ -879,35 +828,22 @@ def get_task_detail(conn, task_id: str) -> dict[str, Any]:
         raise NotFoundError("작업", task_id)
     task = dict(row)
 
-    assigned_to = None
-    if task["agent_pk"]:
-        assigned_to = {"id": task["agent_pk"], "name": task["agent_name"], "role": task["agent_role"]}
-
-    # notes + agent display를 JOIN 1회로 조회
     notes_sql = """
-        SELECT n.id, n.content, n.note_type, n.created_at, n.agent_id,
-               ag.name AS agent_name, ag.role AS agent_role
+        SELECT n.id, n.content, n.note_type, n.created_at
         FROM notes n
-        LEFT JOIN agents ag ON n.agent_id = ag.id
         WHERE n.task_id = %s
         ORDER BY n.created_at ASC
     """
     notes = []
     for n in _exec(conn, notes_sql, (task_id,)).fetchall():
         n = dict(n)
-        if n["agent_name"]:
-            agent_display = f"{n['agent_name']} ({n['agent_role']})"
-        elif n["agent_id"] == "system":
-            agent_display = "system"
-        else:
-            agent_display = n["agent_id"]
-        notes.append({"id": n["id"], "agent": agent_display, "content": n["content"],
+        notes.append({"id": n["id"], "content": n["content"],
                       "note_type": n["note_type"], "created_at": n["created_at"]})
 
     return {"id": task["id"], "title": task["title"], "description": task["description"],
             "status": task["status"], "priority": task["priority"],
             "is_blocked": bool(task["is_blocked"]), "blocker_reason": task["blocker_reason"],
-            "version": task["version"], "assigned_to": assigned_to,
+            "version": task["version"],
             "project": {"id": task["project_pk"], "name": task["project_name"]}, "notes": notes,
             "created_at": task["created_at"], "updated_at": task["updated_at"]}
 
@@ -915,61 +851,38 @@ def get_task_detail(conn, task_id: str) -> dict[str, Any]:
 def get_project_status(conn, project_id: str, activity_hours: int = 24) -> dict[str, Any]:
     project = get_project(conn, project_id)
 
-    # 1) 상태별 카운트 (1회)
+    # 1) 상태별 카운트
     summary = {s: 0 for s in ALL_STATUSES}
     rows = _exec(conn, "SELECT status, COUNT(*) as cnt FROM tasks WHERE project_id=%s GROUP BY status", (project_id,)).fetchall()
     for r in rows:
         summary[r["status"]] = r["cnt"]
 
-    # 2) 에이전트별 워크로드 — LEFT JOIN + GROUP BY (1회)
-    agents_sql = """
-        SELECT a.name, a.role,
-               COALESCE(SUM(CASE WHEN t.status = 'InProgress' THEN 1 ELSE 0 END), 0) AS in_progress,
-               COUNT(t.id) AS total
-        FROM agents a
-        LEFT JOIN tasks t ON t.assignee_id = a.id
-        WHERE a.project_id = %s
-        GROUP BY a.id, a.name, a.role
-    """
-    agents = []
-    for a in _exec(conn, agents_sql, (project_id,)).fetchall():
-        a = dict(a)
-        agents.append({"name": a["name"], "role": a["role"],
-                        "in_progress": a["in_progress"], "total": a["total"]})
-
-    # 3) 블로커 — LEFT JOIN agents (1회)
+    # 2) 블로커
     blocker_sql = """
-        SELECT t.id, t.title, t.blocker_reason,
-               a.name AS agent_name, a.role AS agent_role
+        SELECT t.id, t.title, t.blocker_reason
         FROM tasks t
-        LEFT JOIN agents a ON t.assignee_id = a.id
         WHERE t.project_id = %s AND t.is_blocked = %s
     """
     is_blocked_val = True if _is_pg(conn) else 1
     blockers = []
     for b in _exec(conn, blocker_sql, (project_id, is_blocked_val)).fetchall():
         b = dict(b)
-        assigned_to = f"{b['agent_name']} ({b['agent_role']})" if b["agent_name"] else None
         blockers.append({"task_id": b["id"], "title": b["title"],
-                         "reason": b["blocker_reason"], "assigned_to": assigned_to})
+                         "reason": b["blocker_reason"]})
 
-    # 4) 최근 활동 — JOIN tasks + LEFT JOIN agents (1회)
+    # 3) 최근 활동
     if _is_pg(conn):
-        time_sql = """SELECT n.content, n.agent_id, n.created_at, t.title AS task_title,
-                             a.name AS agent_name
+        time_sql = """SELECT n.content, n.created_at, t.title AS task_title
                       FROM notes n
                       JOIN tasks t ON n.task_id = t.id
-                      LEFT JOIN agents a ON n.agent_id = a.id
                       WHERE t.project_id=%s AND n.note_type='system'
                       AND n.created_at >= NOW() - INTERVAL %s
                       ORDER BY n.created_at DESC LIMIT 20"""
         time_params = (project_id, f"{activity_hours} hours")
     else:
-        time_sql = """SELECT n.content, n.agent_id, n.created_at, t.title AS task_title,
-                             a.name AS agent_name
+        time_sql = """SELECT n.content, n.created_at, t.title AS task_title
                       FROM notes n
                       JOIN tasks t ON n.task_id = t.id
-                      LEFT JOIN agents a ON n.agent_id = a.id
                       WHERE t.project_id=%s AND n.note_type='system'
                       AND n.created_at >= datetime('now', %s)
                       ORDER BY n.created_at DESC LIMIT 20"""
@@ -978,14 +891,12 @@ def get_project_status(conn, project_id: str, activity_hours: int = 24) -> dict[
     recent_activity = []
     for rn in _exec(conn, time_sql, time_params).fetchall():
         rn = dict(rn)
-        agent_name = rn["agent_name"] if rn["agent_name"] else ("system" if rn["agent_id"] == "system" else rn["agent_id"])
         recent_activity.append({
-            "agent": agent_name,
             "action": "status_change" if "Status changed" in rn["content"] else "update",
             "task": rn["task_title"], "detail": rn["content"], "at": rn["created_at"],
         })
 
-    return {"project": project["name"], "summary": summary, "agents": agents,
+    return {"project": project["name"], "summary": summary,
             "blockers": blockers, "recent_activity": recent_activity}
 
 
@@ -1007,47 +918,22 @@ def get_board_markdown(conn, project_id: str) -> str:
 
         has_notes = any("latest_note" in t for t in tasks)
         if has_notes:
-            lines.append("| ID | 작업 | 우선순위 | 담당자 | 최근 메모 | v |")
-            lines.append("|----|------|---------|--------|----------|---|")
+            lines.append("| ID | 작업 | 우선순위 | 최근 메모 | v |")
+            lines.append("|----|------|---------|----------|---|")
             for t in tasks:
                 blocked = " **[BLOCKED]**" if t["is_blocked"] else ""
                 lines.append(f"| {t['id']} | {t['title']}{blocked} | {t['priority']} "
-                             f"| {t['assigned_to'] or '-'} | {t.get('latest_note', '')} | {t['version']} |")
+                             f"| {t.get('latest_note', '')} | {t['version']} |")
         else:
-            lines.append("| ID | 작업 | 우선순위 | 담당자 | v |")
-            lines.append("|----|------|---------|--------|---|")
+            lines.append("| ID | 작업 | 우선순위 | v |")
+            lines.append("|----|------|---------|---|")
             for t in tasks:
                 blocked = " **[BLOCKED]**" if t["is_blocked"] else ""
                 lines.append(f"| {t['id']} | {t['title']}{blocked} | {t['priority']} "
-                             f"| {t['assigned_to'] or '-'} | {t['version']} |")
+                             f"| {t['version']} |")
         lines.append("")
 
     lines.append(f"최종 업데이트: {data['updated_at']}")
     return "\n".join(lines)
 
 
-def get_agents_markdown(conn, project_id: str) -> str:
-    project = get_project(conn, project_id)
-
-    is_blocked_val = True if _is_pg(conn) else 1
-    sql = """
-        SELECT a.name, a.role,
-               COALESCE(SUM(CASE WHEN t.status = 'InProgress' THEN 1 ELSE 0 END), 0) AS in_progress,
-               COUNT(t.id) AS total,
-               COALESCE(SUM(CASE WHEN t.is_blocked = %s THEN 1 ELSE 0 END), 0) AS blockers
-        FROM agents a
-        LEFT JOIN tasks t ON t.assignee_id = a.id
-        WHERE a.project_id = %s
-        GROUP BY a.id, a.name, a.role
-    """
-    rows = _exec(conn, sql, (is_blocked_val, project_id)).fetchall()
-
-    lines = [f"# {project['name']} - Agents\n"]
-    lines.append("| 에이전트 | 역할 | 진행 중 | 전체 | 블로커 |")
-    lines.append("|---------|------|---------|------|--------|")
-
-    for a in rows:
-        a = dict(a)
-        lines.append(f"| {a['name']} | {a['role']} | {a['in_progress']} | {a['total']} | {a['blockers']} |")
-
-    return "\n".join(lines)

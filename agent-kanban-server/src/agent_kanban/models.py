@@ -26,14 +26,6 @@ class Priority(str, Enum):
     CRITICAL = "Critical"
 
 
-class AgentRole(str, Enum):
-    PM = "PM"
-    DEVELOPER = "Developer"
-    REVIEWER = "Reviewer"
-    TESTER = "Tester"
-    DESIGNER = "Designer"
-
-
 class NoteType(str, Enum):
     PROGRESS = "progress"
     BLOCKER = "blocker"
@@ -72,14 +64,6 @@ class ProjectModel(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
-class AgentModel(BaseModel):
-    id: str
-    project_id: str
-    name: str
-    role: str
-    created_at: str
-
-
 class TaskModel(BaseModel):
     id: str
     project_id: str
@@ -87,7 +71,6 @@ class TaskModel(BaseModel):
     description: str = ""
     status: str = "Backlog"
     priority: str = "Medium"
-    assignee_id: str | None = None
     is_blocked: bool = False
     blocker_reason: str | None = None
     version: int = 1
@@ -98,7 +81,6 @@ class TaskModel(BaseModel):
 class NoteModel(BaseModel):
     id: str
     task_id: str
-    agent_id: str
     content: str
     note_type: str = "progress"
     created_at: str
@@ -136,7 +118,7 @@ class VersionConflictError(KanbanError):
     def __init__(self, current_version: int, current_status: str):
         super().__init__(
             error_code="VERSION_CONFLICT",
-            message="다른 에이전트가 이미 수정했습니다. get_task_detail로 최신 상태 조회 후 재시도하세요.",
+            message="이미 수정되었습니다. get_task_detail로 최신 상태 조회 후 재시도하세요.",
             details={
                 "current_version": current_version,
                 "current_status": current_status,
@@ -150,15 +132,6 @@ class WipLimitExceededError(KanbanError):
             error_code="WIP_LIMIT_EXCEEDED",
             message=f"'{status}' 상태의 WIP 제한({limit})을 초과했습니다. 다른 작업을 먼저 완료하세요.",
             details={"status": status, "wip_limit": limit},
-        )
-
-
-class CrossProjectError(KanbanError):
-    def __init__(self, agent_id: str, project_id: str):
-        super().__init__(
-            error_code="CROSS_PROJECT_ERROR",
-            message=f"에이전트 '{agent_id}'는 프로젝트 '{project_id}'에 소속되지 않았습니다.",
-            details={"agent_id": agent_id, "project_id": project_id},
         )
 
 

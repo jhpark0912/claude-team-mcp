@@ -34,7 +34,7 @@ PG_CONFIG = {
     "dbname": os.environ.get("KANBAN_DB_NAME", "ai_board"),
 }
 
-TABLES_ORDER = ["projects", "agents", "tasks", "notes"]
+TABLES_ORDER = ["projects", "plans", "tasks", "notes"]
 
 PG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -44,13 +44,19 @@ CREATE TABLE IF NOT EXISTS projects (
     config      TEXT DEFAULT '{}'
 );
 
-CREATE TABLE IF NOT EXISTS agents (
-    id          TEXT PRIMARY KEY,
-    project_id     TEXT NOT NULL REFERENCES projects(id),
-    name        TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'Developer'
-                CHECK(role IN ('PM','Developer','Reviewer','Tester','Designer')),
-    created_at  TIMESTAMP DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS plans (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    title           TEXT NOT NULL,
+    goal            TEXT DEFAULT '',
+    scope_in        TEXT DEFAULT '',
+    scope_out       TEXT DEFAULT '',
+    archived_at     TIMESTAMP,
+    cancelled_at    TIMESTAMP,
+    on_hold_at      TIMESTAMP,
+    started_at      TIMESTAMP,
+    completed_at    TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -62,18 +68,18 @@ CREATE TABLE IF NOT EXISTS tasks (
                 CHECK(status IN ('Backlog','Todo','InProgress','Review','Done','Rejected')),
     priority    TEXT NOT NULL DEFAULT 'Medium'
                 CHECK(priority IN ('Low','Medium','High','Critical')),
-    assignee_id TEXT REFERENCES agents(id),
     is_blocked  BOOLEAN NOT NULL DEFAULT FALSE,
     blocker_reason TEXT,
     version     INTEGER NOT NULL DEFAULT 1,
     created_at  TIMESTAMP DEFAULT NOW(),
-    updated_at  TIMESTAMP DEFAULT NOW()
+    updated_at  TIMESTAMP DEFAULT NOW(),
+    plan_id     TEXT REFERENCES plans(id),
+    position    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS notes (
     id          TEXT PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    agent_id    TEXT NOT NULL,
     content     TEXT NOT NULL,
     note_type   TEXT NOT NULL DEFAULT 'progress'
                 CHECK(note_type IN ('progress','blocker','handoff','review','system')),
@@ -90,8 +96,11 @@ def read_sqlite(db_path: Path) -> dict[str, list[dict]]:
 
     data: dict[str, list[dict]] = {}
     for table in TABLES_ORDER:
-        rows = conn.execute(f"SELECT * FROM {table}").fetchall()
-        data[table] = [dict(row) for row in rows]
+        try:
+            rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+            data[table] = [dict(row) for row in rows]
+        except sqlite3.OperationalError:
+            data[table] = []
         print(f"  {table}: {len(data[table])}건")
 
     conn.close()
@@ -127,23 +136,27 @@ INSERT_SQL = {
         VALUES (%(id)s, %(name)s, %(created_at)s, %(config)s)
         ON CONFLICT (id) DO NOTHING
     """,
-    "agents": """
-        INSERT INTO agents (id, project_id, name, role, created_at)
-        VALUES (%(id)s, %(project_id)s, %(name)s, %(role)s, %(created_at)s)
+    "plans": """
+        INSERT INTO plans (id, project_id, title, goal, scope_in, scope_out,
+                           archived_at, cancelled_at, on_hold_at, started_at,
+                           completed_at, created_at)
+        VALUES (%(id)s, %(project_id)s, %(title)s, %(goal)s, %(scope_in)s, %(scope_out)s,
+                %(archived_at)s, %(cancelled_at)s, %(on_hold_at)s, %(started_at)s,
+                %(completed_at)s, %(created_at)s)
         ON CONFLICT (id) DO NOTHING
     """,
     "tasks": """
         INSERT INTO tasks (id, project_id, title, description, status, priority,
-                           assignee_id, is_blocked, blocker_reason, version,
-                           created_at, updated_at)
+                           is_blocked, blocker_reason, version,
+                           created_at, updated_at, plan_id, position)
         VALUES (%(id)s, %(project_id)s, %(title)s, %(description)s, %(status)s,
-                %(priority)s, %(assignee_id)s, %(is_blocked)s, %(blocker_reason)s,
-                %(version)s, %(created_at)s, %(updated_at)s)
+                %(priority)s, %(is_blocked)s, %(blocker_reason)s,
+                %(version)s, %(created_at)s, %(updated_at)s, %(plan_id)s, %(position)s)
         ON CONFLICT (id) DO NOTHING
     """,
     "notes": """
-        INSERT INTO notes (id, task_id, agent_id, content, note_type, created_at)
-        VALUES (%(id)s, %(task_id)s, %(agent_id)s, %(content)s, %(note_type)s, %(created_at)s)
+        INSERT INTO notes (id, task_id, content, note_type, created_at)
+        VALUES (%(id)s, %(task_id)s, %(content)s, %(note_type)s, %(created_at)s)
         ON CONFLICT (id) DO NOTHING
     """,
 }

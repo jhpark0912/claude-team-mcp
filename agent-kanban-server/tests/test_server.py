@@ -5,7 +5,6 @@ import pytest
 from agent_kanban import db
 from agent_kanban.server import _get_conn, mcp
 
-# Override DB to use temp for tests
 import agent_kanban.server as server_module
 
 
@@ -27,48 +26,42 @@ class TestToolIntegration:
     """Test tools through direct function calls (without MCP transport)."""
 
     @pytest.mark.asyncio
-    async def test_init_project_and_agent(self, reset_conn):
+    async def test_init_project(self, reset_conn):
         conn = reset_conn
         project = db.init_project(conn, "Integration Project")
         assert project["id"].startswith("project-")
-
-        agent = db.add_agent(conn, project["id"], "Bot", "Developer")
-        assert agent["id"].startswith("agent-")
 
     @pytest.mark.asyncio
     async def test_full_task_lifecycle(self, reset_conn):
         conn = reset_conn
         project = db.init_project(conn, "Lifecycle Project")
-        agent = db.add_agent(conn, project["id"], "Worker", "Developer")
 
         # Create task
-        task = db.create_task(conn, project["id"], "Lifecycle Task",
-                              assignee_id=agent["id"])
+        task = db.create_task(conn, project["id"], "Lifecycle Task")
         assert task["status"] == "Backlog"
         v = task["version"]
 
         # Backlog → Todo
-        r = db.update_task_status(conn, task["id"], "Todo", v, agent["id"])
+        r = db.update_task_status(conn, task["id"], "Todo", v)
         v = r["version"]
         assert r["new_status"] == "Todo"
 
         # Todo → InProgress
-        r = db.update_task_status(conn, task["id"], "InProgress", v, agent["id"],
+        r = db.update_task_status(conn, task["id"], "InProgress", v,
                                   comment="Starting work")
         v = r["version"]
         assert r["new_status"] == "InProgress"
 
         # Add note
-        note = db.add_note(conn, task["id"], agent["id"],
-                           "50% complete", "progress")
+        note = db.add_note(conn, task["id"], "50% complete", "progress")
         assert note["total_notes"] >= 1
 
         # InProgress → Review
-        r = db.update_task_status(conn, task["id"], "Review", v, agent["id"])
+        r = db.update_task_status(conn, task["id"], "Review", v)
         v = r["version"]
 
         # Review → Done
-        r = db.update_task_status(conn, task["id"], "Done", v, agent["id"],
+        r = db.update_task_status(conn, task["id"], "Done", v,
                                   comment="All tests pass")
         assert r["new_status"] == "Done"
 
@@ -81,9 +74,7 @@ class TestToolIntegration:
     async def test_blocker_workflow(self, reset_conn):
         conn = reset_conn
         project = db.init_project(conn, "Blocker Project")
-        agent = db.add_agent(conn, project["id"], "Dev", "Developer")
-        task = db.create_task(conn, project["id"], "Blocker Task",
-                              assignee_id=agent["id"])
+        task = db.create_task(conn, project["id"], "Blocker Task")
 
         # Set blocker
         r = db.flag_blocker(conn, task["id"], True, task["version"],
@@ -103,38 +94,32 @@ class TestToolIntegration:
 
     @pytest.mark.asyncio
     async def test_version_conflict_scenario(self, reset_conn):
-        """Simulate two agents trying to update the same task."""
+        """Simulate two sessions trying to update the same task."""
         conn = reset_conn
         project = db.init_project(conn, "Conflict Project")
-        a1 = db.add_agent(conn, project["id"], "Agent1", "Developer")
-        a2 = db.add_agent(conn, project["id"], "Agent2", "Developer")
 
         task = db.create_task(conn, project["id"], "Shared Task")
         v = task["version"]
 
-        # Agent1 moves to Todo
-        r1 = db.update_task_status(conn, task["id"], "Todo", v, a1["id"])
+        # Session 1 moves to Todo
+        r1 = db.update_task_status(conn, task["id"], "Todo", v)
 
-        # Agent2 tries InProgress with stale version (v=1, but current is v=2)
+        # Session 2 tries with stale version
         from agent_kanban.models import VersionConflictError
         with pytest.raises(VersionConflictError):
-            db.update_task_status(conn, task["id"], "InProgress", v, a2["id"])
+            db.update_task_status(conn, task["id"], "InProgress", v)
 
-        # Agent2 retries with correct version
-        r2 = db.update_task_status(conn, task["id"], "InProgress",
-                                   r1["version"], a2["id"])
+        # Session 2 retries with correct version
+        r2 = db.update_task_status(conn, task["id"], "InProgress", r1["version"])
         assert r2["new_status"] == "InProgress"
 
     @pytest.mark.asyncio
     async def test_project_status_report(self, reset_conn):
         conn = reset_conn
         project = db.init_project(conn, "Status Project")
-        dev = db.add_agent(conn, project["id"], "Dev", "Developer")
-        pm = db.add_agent(conn, project["id"], "PM", "PM")
 
-        db.create_task(conn, project["id"], "T1", assignee_id=dev["id"])
-        db.create_task(conn, project["id"], "T2", assignee_id=pm["id"])
+        db.create_task(conn, project["id"], "T1")
+        db.create_task(conn, project["id"], "T2")
 
         status = db.get_project_status(conn, project["id"])
         assert status["summary"]["Backlog"] == 2
-        assert len(status["agents"]) == 2

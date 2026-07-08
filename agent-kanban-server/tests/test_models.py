@@ -5,7 +5,6 @@ import pytest
 from agent_kanban.models import (
     ALL_STATUSES,
     VALID_TRANSITIONS,
-    AgentRole,
     InvalidTransitionError,
     NoteType,
     Priority,
@@ -26,10 +25,6 @@ class TestEnums:
     def test_priority_values(self):
         assert Priority.LOW.value == "Low"
         assert Priority.CRITICAL.value == "Critical"
-
-    def test_agent_role_values(self):
-        assert AgentRole.PM.value == "PM"
-        assert AgentRole.DEVELOPER.value == "Developer"
 
     def test_note_type_values(self):
         assert NoteType.PROGRESS.value == "progress"

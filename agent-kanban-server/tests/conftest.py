@@ -24,12 +24,3 @@ def conn(tmp_path: Path, monkeypatch):
 def project(conn):
     """Create a test project."""
     return db.init_project(conn, "Test Project")
-
-
-@pytest.fixture
-def agents(conn, project):
-    """Create test agents: alice (PM), bob (Developer), charlie (Reviewer)."""
-    alice = db.add_agent(conn, project["id"], "Alice", "PM")
-    bob = db.add_agent(conn, project["id"], "Bob", "Developer")
-    charlie = db.add_agent(conn, project["id"], "Charlie", "Reviewer")
-    return {"alice": alice, "bob": bob, "charlie": charlie}

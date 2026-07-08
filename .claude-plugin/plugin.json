@@ -1,7 +1,7 @@
 {
   "name": "ai-board",
   "description": "칸반 보드를 워크플로우 엔진으로 쓰는 AI-Board — /plan·/plan-run·/retro·/resume 커맨드와 MCP 서버를 함께 번들",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "JH.PARK"
   },
